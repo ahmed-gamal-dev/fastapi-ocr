@@ -1028,7 +1028,7 @@ template. The table below covers the ones that matter most.
 | `STORE_UPLOADS_DIR` | `./data/uploads` | |
 | `TRUST_PROXY_HEADERS` | `false` | Enable **only** behind a reverse proxy. |
 | `ALLOWED_ORIGINS` | *(empty)* | Empty means no CORS headers — correct for server-to-server. |
-| `ALLOWED_HOSTS` | `*` | |
+| `ALLOWED_HOSTS` | `*` | Must include `127.0.0.1,localhost` alongside your domain, or local health probes are rejected with `400 Invalid host header`. |
 | `DOCS_ENABLED` | `true` | Turn off for public deployments. |
 
 ### Server, imaging and logging
@@ -1663,7 +1663,7 @@ enforces in `tests/test_provider_isolation.py`.
 - [ ] `.env` created from `.env.production.example`
 - [ ] `OCR_API_KEY` set to a generated secret, not `CHANGE_ME`
 - [ ] `.env` is `chmod 600`, owned by `ocr`
-- [ ] `ALLOWED_HOSTS` set to the real domain
+- [ ] `ALLOWED_HOSTS` set to the real domain **plus `127.0.0.1,localhost`**
 - [ ] `TRUST_PROXY_HEADERS=true`, `DOCS_ENABLED=false`, `DEBUG=false`
 - [ ] `LOG_SENSITIVE_DATA=false`
 - [ ] `OCR_PROVIDER` set deliberately (`stub` to prove plumbing, then `paddle`)
