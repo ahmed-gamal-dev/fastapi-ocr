@@ -25,6 +25,14 @@ def run(code: str) -> str:
             "OCR_PROVIDER": "stub",
             "OCR_API_KEY": "isolation-key",
             "LOG_LEVEL": "CRITICAL",
+            # The subprocess starts in the repository root, where a deployed
+            # .env may live. Environment variables win over that file, so pin
+            # the settings that decide whether a request is served at all -
+            # otherwise TrustedHostMiddleware rejects TestClient's host and
+            # these tests fail for reasons unrelated to provider isolation.
+            "ALLOWED_HOSTS": "*",
+            "ALLOWED_ORIGINS": "",
+            "TRUST_PROXY_HEADERS": "false",
         },
     )
     assert result.returncode == 0, result.stderr[-2000:]
