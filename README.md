@@ -38,19 +38,19 @@ of the HTTP service.
 8. [Python integration](#python-integration)
 9. [Passport / MRZ parser](#passport--mrz-parser)
 10. [Deployment](#deployment)
-11. [Configuration](#configuration)
-12. [Performance and concurrency](#performance-and-concurrency)
-13. [Security and privacy](#security-and-privacy)
-14. [Testing](#testing)
-15. [Project structure](#project-structure)
-16. [Extending the OCR engine](#extending-the-ocr-engine)
-17. [Production deployment guide (detailed)](#production-deployment-ubuntu-2204--2404-no-docker)
-18. [Troubleshooting](#troubleshooting)
-19. [Roadmap](#roadmap)
-20. [Contributing](#contributing)
-21. [License](#license)
-22. [FAQ](#faq)
-
+11. [CI / CD](#ci--cd)
+12. [Configuration](#configuration)
+13. [Performance and concurrency](#performance-and-concurrency)
+14. [Security and privacy](#security-and-privacy)
+15. [Testing](#testing)
+16. [Project structure](#project-structure)
+17. [Extending the OCR engine](#extending-the-ocr-engine)
+18. [Production deployment guide (detailed)](#production-deployment-ubuntu-2204--2404-no-docker)
+19. [Troubleshooting](#troubleshooting)
+20. [Roadmap](#roadmap)
+21. [Contributing](#contributing)
+22. [License](#license)
+23. [FAQ](#faq)
 ---
 
 ## Why?
@@ -887,14 +887,101 @@ Deployment artifacts in this repository:
 | File | Purpose |
 |---|---|
 | [`deploy/passport-ocr.service`](deploy/passport-ocr.service) | systemd unit: loopback bind, env file, hardening profile, memory cap |
-| [`deploy/nginx.conf`](deploy/nginx.conf) | Reverse proxy: TLS, rate limiting, upload cap, timeouts |
+| [`deploy/nginx.conf`](deploy/nginx.conf) | Reverse proxy for a plain Nginx install: TLS, rate limiting, upload cap, timeouts |
+| [`deploy/nginx-aapanel.conf`](deploy/nginx-aapanel.conf) | Location blocks for a server managed by **aaPanel** |
 | [`.env.production.example`](.env.production.example) | Production configuration template |
+| [`scripts/deploy.sh`](scripts/deploy.sh) | In-place update with tests, health check and automatic rollback |
+
+### On a server managed by aaPanel (or cPanel/Plesk)
+
+aaPanel owns Nginx: it generates each site's config under
+`/www/server/panel/vhost/nginx/` and rewrites it when you change the site in
+the panel. Do not install `deploy/nginx.conf` there — it assumes the standard
+`/etc/nginx/sites-available` layout and hand-edits can be overwritten.
+
+Use [`deploy/nginx-aapanel.conf`](deploy/nginx-aapanel.conf) instead. It
+contains only `location` blocks, proxying just this service's own routes, so an
+existing PHP application on the same domain keeps working. Issue TLS through
+the panel (**Website → SSL → Let's Encrypt**) rather than running certbot by
+hand, or the two will fight over the config.
+
+The systemd unit, the service user, the virtualenv and the firewall steps are
+unchanged — aaPanel only affects the Nginx layer.
 
 The full step-by-step guide — server preparation, packages, service user,
 permissions, systemd, Nginx, HTTPS, firewall, health checks, logs, restart and
 update procedures, plus a deployment checklist — is in
 [Production deployment](#production-deployment-ubuntu-2204--2404-no-docker)
 below.
+
+---
+
+## CI / CD
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
+`master`, every pull request, and on demand.
+
+| Job | What it does |
+|---|---|
+| `test` | Installs `requirements-ci.txt`, runs `ruff`, then the suite on Python 3.9, 3.11 and 3.12 |
+| `config` | Checks the env examples against `Settings`, that documented response fields match the schema, that the shell scripts parse, and that no credential patterns are committed |
+
+CI installs [`requirements-ci.txt`](requirements-ci.txt) — the service **without**
+PaddlePaddle/PaddleOCR. That is deliberate: the default suite runs against
+`OCR_PROVIDER=stub` and never imports the engine, so leaving a large,
+platform-sensitive wheel out of every pull request keeps runs fast and stable.
+The integration tests skip themselves when the engine is absent, and are meant
+to run on the target server instead.
+
+### Continuous deployment
+
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) SSHes into the
+server and runs [`scripts/deploy.sh`](scripts/deploy.sh). It is **opt-in**: with
+no secrets configured the job stops with a clear message rather than failing
+obscurely.
+
+Add these under **Settings → Secrets and variables → Actions**:
+
+| Secret | Required | Meaning |
+|---|---|---|
+| `DEPLOY_HOST` | yes | Server hostname or IP |
+| `DEPLOY_USER` | yes | SSH user; needs sudo for `systemctl restart` |
+| `DEPLOY_SSH_KEY` | yes | Private key, full PEM contents |
+| `DEPLOY_PATH` | yes | Checkout on the server, e.g. `/opt/passport-ocr` |
+| `DEPLOY_PORT` | no | SSH port, default `22` |
+| `DEPLOY_SERVICE` | no | systemd unit, default `passport-ocr` |
+| `DEPLOY_HEALTH_URL` | no | default `http://127.0.0.1:8000/health` |
+
+Create a dedicated deploy key rather than reusing a personal one:
+
+```bash
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f ~/.ssh/ocr_deploy -N ""
+```
+
+Put the **public** half in the server user's `~/.ssh/authorized_keys` and the
+**private** half in `DEPLOY_SSH_KEY`.
+
+Deployment triggers automatically after CI passes on `master`, or manually via
+**Actions → Deploy → Run workflow**. The workflow pins the server's host key
+before connecting and deletes the private key from the runner afterwards.
+
+### What `scripts/deploy.sh` does
+
+Run it on the server directly, or let the workflow call it:
+
+```bash
+cd /opt/passport-ocr && sudo -u ocr ./scripts/deploy.sh
+```
+
+1. Fetches `origin/master`; exits early if already up to date
+2. Refuses to run if the server's working tree has uncommitted changes
+3. Installs dependencies **only** when `requirements.txt` actually changed
+4. Runs the stub-provider suite — on failure it resets and stops **without**
+   restarting, so a broken commit never reaches the running service
+5. Restarts the unit and polls `/health`
+6. **Rolls back to the previous commit and restarts** if the health check fails
 
 ---
 
