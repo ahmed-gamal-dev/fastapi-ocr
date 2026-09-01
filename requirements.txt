@@ -1,0 +1,32 @@
+# Core service dependencies.
+# Install into a virtualenv:  pip install -r requirements.txt
+
+# --- web layer -------------------------------------------------------------
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+python-multipart>=0.0.9
+
+# --- configuration and validation ------------------------------------------
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+
+# --- imaging ---------------------------------------------------------------
+# The headless build avoids pulling in GUI/X11 system libraries, which a
+# service never needs.
+opencv-python-headless>=4.8,<5.0
+numpy>=1.24,<2.0
+
+# --- OCR engine ------------------------------------------------------------
+# paddlepaddle is the runtime; paddleocr is the model/pipeline layer.
+#
+# 3.x is required, not merely preferred. paddlepaddle 2.6.2's bundled arm64
+# BLAS kernel faults inside cblas_sgemm during convolution on Apple Silicon,
+# and Paddle's own crash handler then spins forever symbolising the stack -
+# the process pins a core and never returns rather than raising. 3.x has
+# working arm64 kernels. The provider still speaks both API dialects, so
+# pinning back to 2.x on x86 remains possible if you need it.
+#
+# On first run the models are downloaded to ~/.paddlex/official_models
+# (about 100 MB for English plus Arabic). See README "First run".
+paddlepaddle>=3.0,<4.0
+paddleocr>=3.0,<4.0

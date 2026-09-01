@@ -1,0 +1,5 @@
+# Optional extras. Install only if you need them.
+
+# Shared rate limiting across multiple workers or hosts.
+# Enable by setting REDIS_URL=redis://localhost:6379/0
+redis>=5.0

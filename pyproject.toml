@@ -1,0 +1,39 @@
+[project]
+name = "document-ocr-service"
+version = "1.0.0"
+description = "Local, open-source OCR microservice built on FastAPI, PaddleOCR and OpenCV"
+requires-python = ">=3.9"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: exercises the real PaddleOCR engine (slow; skipped when it is not installed)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette.*",
+]
+
+[tool.ruff]
+line-length = 96
+# Matches requires-python: the codebase stays importable on 3.9 so the
+# pure-logic modules can be exercised on older interpreters.
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "B008",   # FastAPI declares dependencies as call defaults
+    # The codebase targets 3.9+ and Pydantic evaluates annotations at runtime,
+    # where PEP 604 unions are unavailable. typing.Optional/List are used
+    # consistently rather than mixed with the newer builtin generics.
+    "UP006",
+    "UP007",
+    "UP035",
+    "UP045",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

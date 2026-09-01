@@ -1,0 +1,100 @@
+# systemd unit for the document OCR service.
+#
+# Install:
+#   sudo cp deploy/passport-ocr.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now passport-ocr
+#
+# Adjust User, Group and the paths below if you deploy somewhere other than
+# /opt/passport-ocr.
+
+[Unit]
+Description=Document OCR service (FastAPI + PaddleOCR)
+Documentation=file:///opt/passport-ocr/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=ocr
+Group=ocr
+WorkingDirectory=/opt/passport-ocr
+
+# Secrets live in the environment file, never on the command line, where they
+# would be visible to every user via `ps`.
+EnvironmentFile=/opt/passport-ocr/.env
+
+# One thread per math library. Each Uvicorn worker already runs its own OCR
+# pool; letting BLAS/OpenMP fan out over every core on top of that makes
+# concurrent requests contend and finish slower.
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=PYTHONUNBUFFERED=1
+# Keep the model cache inside the app directory so it survives updates and is
+# owned by the service user.
+Environment=PADDLE_PDX_CACHE_HOME=/opt/passport-ocr/models
+
+# Bind to loopback only. Nginx is the public entry point.
+ExecStart=/opt/passport-ocr/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --timeout-keep-alive 30 \
+    --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1
+
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+# Model loading can take a couple of minutes on a cold cache.
+TimeoutStartSec=300
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+# --- logging -------------------------------------------------------------
+# The application emits structured JSON on stdout; journald collects it.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=passport-ocr
+
+# --- hardening -----------------------------------------------------------
+# This service handles uploaded document images: give it as little of the
+# system as it can function with.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# ProtectSystem=strict makes everything read-only; name the few paths that
+# must be writable.
+ReadWritePaths=/opt/passport-ocr/models
+ReadWritePaths=/opt/passport-ocr/data
+ReadWritePaths=/tmp
+
+# --- resource limits ------------------------------------------------------
+# A single worker with two languages resident sits well under 2 GB; the cap is
+# a backstop against a runaway process, not a target.
+MemoryMax=3G
+MemoryHigh=2500M
+TasksMax=256
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target
