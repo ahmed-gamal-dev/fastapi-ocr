@@ -94,6 +94,21 @@ async def ocr(
     min_confidence: float = Query(
         default=0.0, ge=0.0, le=1.0, description="Drop boxes below this confidence"
     ),
+    mrz: Optional[bool] = Query(
+        default=None,
+        description=(
+            "Parse a machine-readable zone (ICAO 9303 TD1/TD2/TD3/MRV) if the "
+            "document has one. Defaults to the ENABLE_MRZ setting. The `mrz` "
+            "block is absent when no zone was found."
+        ),
+    ),
+    include_mrz_raw: bool = Query(
+        default=False,
+        description=(
+            "Include the zone exactly as read. It reproduces every field in one "
+            "string, so it is opt-in."
+        ),
+    ),
     _: str = Depends(enforce_rate_limit),
 ) -> OCRResponse:
     """Run OCR over one image and return the recognised text with geometry.
@@ -117,6 +132,7 @@ async def ocr(
             include_blocks=include_blocks,
             include_regions=include_regions,
             min_confidence=min_confidence,
+            parse_mrz=mrz,
         )
         result = await run_pipeline(data, image.filename, options)
         store_upload_if_enabled(data, result.image.detected_mime if result.image else None)
@@ -126,4 +142,6 @@ async def ocr(
         await image.close()
 
     elapsed = (time.perf_counter() - started) * 1000
-    return build_response(result, request_id_ctx.get(), elapsed)
+    return build_response(
+        result, request_id_ctx.get(), elapsed, include_mrz_raw=include_mrz_raw
+    )

@@ -50,6 +50,7 @@ class PipelineOptions:
     include_blocks: bool = True
     include_regions: bool = False
     min_confidence: float = 0.0
+    parse_mrz: bool = False
 
     @classmethod
     def build(
@@ -60,6 +61,7 @@ class PipelineOptions:
         include_blocks: Optional[bool] = None,
         include_regions: bool = False,
         min_confidence: float = 0.0,
+        parse_mrz: Optional[bool] = None,
     ) -> PipelineOptions:
         return cls(
             languages=list(languages) if languages else list(settings.OCR_LANGUAGES),
@@ -78,6 +80,7 @@ class PipelineOptions:
             ),
             include_regions=include_regions,
             min_confidence=max(0.0, min(1.0, min_confidence)),
+            parse_mrz=(settings.ENABLE_MRZ if parse_mrz is None else parse_mrz),
         )
 
 
@@ -94,6 +97,8 @@ class PipelineResult:
     preprocessing: Optional[PreprocessResult] = None
     timings: Dict[str, float] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    #: Parsed machine-readable zone, or None when none was found or requested.
+    mrz: Optional[Any] = None
 
     @property
     def word_count(self) -> int:
@@ -194,6 +199,21 @@ async def run_pipeline(
     if not blocks:
         warnings.append("no text was recognised in the image")
 
+    # ---------------------------------------------------------------- MRZ
+    # Optional and additive: callers that do not ask for it see exactly the
+    # response they saw before, and a document without a zone yields None
+    # rather than an error. Parsing is text-only, so the cost is negligible
+    # next to recognition.
+    mrz_document = None
+    if options.parse_mrz and blocks:
+        started_mrz = time.perf_counter()
+        try:
+            mrz_document = _parse_mrz(blocks, summary_mean=None)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("mrz_parse_failed", extra={"error": str(exc)})
+            warnings.append("machine-readable zone parsing failed")
+        timings["mrz_ms"] = round((time.perf_counter() - started_mrz) * 1000, 1)
+
     summary = confidence_summary(lines)
     if summary["mean"] and summary["mean"] < settings.MIN_OVERALL_CONFIDENCE:
         warnings.append("overall recognition confidence is low")
@@ -211,6 +231,7 @@ async def run_pipeline(
         preprocessing=prepared,
         timings=timings,
         warnings=warnings,
+        mrz=mrz_document,
     )
 
     # Counts and timings only: no recognised text ever reaches the log stream.
@@ -224,6 +245,26 @@ async def run_pipeline(
             "mean_confidence": summary["mean"],
             "timings": timings,
             "steps": prepared.steps,
+            # Whether a zone was found and whether it validated - never its
+            # contents, which are personal data.
+            "mrz_found": mrz_document is not None,
+            "mrz_valid": bool(mrz_document and mrz_document.valid),
         },
     )
     return result
+
+
+def _parse_mrz(blocks: Sequence[TextBlock], summary_mean: Optional[float] = None):
+    """Find and parse a machine-readable zone in the recognised boxes.
+
+    Uses the geometry-aware detector: a zone line is frequently split across
+    several recognition boxes, and regrouping them by baseline recovers the
+    line that a plain text join would mangle.
+    """
+    from app.services.mrz.detector import detect_and_parse
+    from app.services.mrz.icao import ICAOMRZParser
+
+    result = detect_and_parse(blocks)
+    if result is None or not result.structure_valid:
+        return None
+    return ICAOMRZParser().build_document(result, ocr_confidence=result.ocr_confidence)
