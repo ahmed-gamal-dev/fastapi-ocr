@@ -1360,12 +1360,35 @@ sudo apt update
 sudo apt install -y python3.11 python3.11-venv python3.11-dev
 ```
 
-`opencv-python-headless` needs no X11 or GUI libraries, which is exactly why
-the project uses it. Some minimal images still lack these:
+**If you will run `OCR_PROVIDER=paddle`, these two are required, not optional:**
 
 ```bash
-sudo apt install -y libgl1 libglib2.0-0    # only if OpenCV fails to import
+sudo apt install -y libgl1 libglib2.0-0
 ```
+
+This project depends on `opencv-python-headless`, which needs no GUI libraries.
+PaddleOCR undoes that: `paddlex` pins `opencv-contrib-python==4.10.0.84` — the
+build *with* GUI support — in the `ocr-core` extra, so installing the engine
+pulls it in regardless of what this project asks for. Without `libgl1` the very
+first `import cv2` then fails with:
+
+```
+ImportError: libGL.so.1: cannot open shared object file
+```
+
+They are not needed for `OCR_PROVIDER=stub`, which never installs the engine.
+
+If you would rather keep GUI libraries off the server, swap in the headless
+build of the same version after installing the requirements:
+
+```bash
+sudo -u ocr /opt/passport-ocr/.venv/bin/pip install \
+    opencv-contrib-python-headless==4.10.0.84
+```
+
+pip will warn that this conflicts with what `paddlex` declared. It provides the
+same `cv2` module at the same version without the GUI dependency, but a later
+`pip install -r requirements.txt` will put the original build back.
 
 ### 3. Application user and directory
 
@@ -1655,6 +1678,7 @@ enforces in `tests/test_provider_isolation.py`.
 - [ ] `ocr` system user created, `nologin` shell
 - [ ] Repository at `/opt/passport-ocr`, source owned by `root:ocr`
 - [ ] `.venv` created and requirements installed
+- [ ] `libgl1` and `libglib2.0-0` installed (required by the engine's OpenCV build)
 - [ ] `paddle` and `paddleocr` import successfully
 - [ ] Models pre-downloaded into `/opt/passport-ocr/models`
 - [ ] **Inference validated on this server** (step 4)
