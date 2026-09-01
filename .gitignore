@@ -12,3 +12,9 @@ tests/fixtures/local/
 *.egg-info/
 .DS_Store
 .env.production
+
+# IDE / editor state (machine-specific)
+.idea/
+.vscode/
+*.swp
+*~
