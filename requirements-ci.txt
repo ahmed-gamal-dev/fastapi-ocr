@@ -1,0 +1,32 @@
+# Dependencies for continuous integration.
+#
+# The default test suite runs against OCR_PROVIDER=stub, which loads no model
+# and never imports PaddleOCR - tests/test_provider_isolation.py enforces that.
+# So CI deliberately installs the service WITHOUT paddlepaddle/paddleocr:
+# it keeps runs fast and removes a large, platform-sensitive wheel from the
+# critical path of every pull request.
+#
+# The integration suite (tests/integration) skips itself automatically when the
+# engine is absent, so nothing is silently passed over - those tests are marked
+# `integration` and are meant to run on the target server.
+#
+# Full runtime dependencies live in requirements.txt.
+
+# --- web layer -------------------------------------------------------------
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+python-multipart>=0.0.9
+
+# --- configuration and validation ------------------------------------------
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+
+# --- imaging ---------------------------------------------------------------
+opencv-python-headless>=4.8,<5.0
+numpy>=1.24,<2.0
+
+# --- test tooling ----------------------------------------------------------
+pytest>=8.0
+pytest-cov>=4.1
+httpx>=0.27
+ruff>=0.4

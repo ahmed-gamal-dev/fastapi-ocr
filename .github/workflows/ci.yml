@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor declared in pyproject.toml, and the version the deployment
+        # guide targets.
+        python-version: ["3.9", "3.11", "3.12"]
+
+    env:
+      # The suite must pass without any OCR model present. This is also what
+      # tests/test_provider_isolation.py asserts.
+      OCR_PROVIDER: stub
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-ci.txt
+
+      - name: Lint (ruff)
+        run: ruff check app tests
+
+      - name: Run test suite
+        # Integration tests need the real PaddleOCR engine and are excluded
+        # here on purpose; they are meant to run on the target server.
+        run: pytest -m "not integration" --cov=app --cov-report=term
+
+      - name: Verify the stub path never imports PaddleOCR
+        run: pytest tests/test_provider_isolation.py -v
+
+  config:
+    name: Config and docs consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OCR_PROVIDER: stub
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-ci.txt
+
+      - name: Every key in the env examples maps to a real setting
+        run: |
+          python - <<'PY'
+          import re, pathlib, sys
+          from app.core.config import Settings
+          known = set(Settings.model_fields)
+          failed = False
+          for name in (".env.example", ".env.production.example"):
+              text = pathlib.Path(name).read_text()
+              keys = {m.group(1) for m in re.finditer(r"^([A-Z][A-Z0-9_]*)=", text, re.M)}
+              unknown = sorted(keys - known)
+              if unknown:
+                  print(f"{name}: unknown settings {unknown}")
+                  failed = True
+              else:
+                  print(f"{name}: OK ({len(keys)} keys)")
+          sys.exit(1 if failed else 0)
+          PY
+
+      - name: The env examples parse into Settings
+        run: |
+          python - <<'PY'
+          import pathlib
+          from app.core.config import Settings
+          for name in (".env.example", ".env.production.example"):
+              data = {}
+              for line in pathlib.Path(name).read_text().splitlines():
+                  line = line.strip()
+                  if not line or line.startswith("#") or "=" not in line:
+                      continue
+                  key, _, value = line.partition("=")
+                  if value.strip():
+                      data[key.strip()] = value.strip()
+              data.setdefault("OCR_API_KEY", "ci")
+              Settings(**data)
+              print(f"{name}: parses cleanly")
+          PY
+
+      - name: Documented response fields match the schema
+        run: |
+          python - <<'PY'
+          import pathlib, sys
+          from app.schemas.ocr import OCRResponse
+          props = set(OCRResponse.model_json_schema()["properties"])
+          readme = pathlib.Path("README.md").read_text()
+          missing = sorted(p for p in props if f'"{p}"' not in readme)
+          if missing:
+              print("response fields absent from README:", missing)
+              sys.exit(1)
+          print("all", len(props), "response fields documented")
+          PY
+
+      - name: Shell scripts are syntactically valid
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script" && echo "OK $script"
+          done
+
+      - name: No secrets committed
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          patterns = {
+              "private key": r"BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY",
+              "aws key": r"(AKIA|ASIA)[0-9A-Z]{16}",
+              "github token": r"gh[pousr]_[A-Za-z0-9]{36}",
+              "slack token": r"xox[baprs]-",
+          }
+          bad = []
+          for path in pathlib.Path(".").rglob("*"):
+              if not path.is_file() or ".git/" in str(path):
+                  continue
+              try:
+                  text = path.read_text(errors="ignore")
+              except OSError:
+                  continue
+              for label, pattern in patterns.items():
+                  if re.search(pattern, text):
+                      bad.append(f"{path}: {label}")
+          if bad:
+              print("\n".join(bad))
+              sys.exit(1)
+          print("no credential patterns found")
+          PY

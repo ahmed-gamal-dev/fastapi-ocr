@@ -1,0 +1,101 @@
+name: Deploy
+
+# Deployment is opt-in and never runs automatically on a fork or a pull
+# request. It requires four repository secrets; without them the job stops
+# with a clear message instead of failing cryptically.
+#
+#   DEPLOY_HOST        server hostname or IP
+#   DEPLOY_USER        SSH user (needs sudo for `systemctl restart`)
+#   DEPLOY_SSH_KEY     private key, full PEM contents
+#   DEPLOY_PATH        checkout on the server, e.g. /opt/passport-ocr
+#
+# Optional:
+#   DEPLOY_PORT        SSH port (default 22)
+#   DEPLOY_SERVICE     systemd unit name (default passport-ocr)
+#   DEPLOY_HEALTH_URL  health endpoint (default http://127.0.0.1:8000/health)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: "Run the test suite on the server before restarting"
+        type: boolean
+        default: true
+  workflow_run:
+    workflows: ["CI"]
+    branches: [master]
+    types: [completed]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to server
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+
+    # On the automatic path, only deploy when CI actually passed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Check that deployment secrets are configured
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          PATH_: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          missing=""
+          [ -n "$HOST" ]  || missing="$missing DEPLOY_HOST"
+          [ -n "$USER" ]  || missing="$missing DEPLOY_USER"
+          [ -n "$KEY" ]   || missing="$missing DEPLOY_SSH_KEY"
+          [ -n "$PATH_" ] || missing="$missing DEPLOY_PATH"
+          if [ -n "$missing" ]; then
+            echo "::error::Deployment secrets not configured:$missing"
+            echo "Add them under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          echo "All required secrets are present."
+
+      - name: Configure SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          PORT: ${{ secrets.DEPLOY_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pin the host key so the deploy cannot be silently redirected.
+          ssh-keyscan -p "${PORT:-22}" -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run the deployment script on the server
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          PORT: ${{ secrets.DEPLOY_PORT }}
+          APP_PATH: ${{ secrets.DEPLOY_PATH }}
+          SERVICE: ${{ secrets.DEPLOY_SERVICE }}
+          HEALTH_URL: ${{ secrets.DEPLOY_HEALTH_URL }}
+          RUN_TESTS: ${{ inputs.run_tests == false && '0' || '1' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${PORT:-22}" \
+              -o BatchMode=yes -o ConnectTimeout=15 \
+              "$USER@$HOST" \
+              "cd '$APP_PATH' \
+                && SERVICE='${SERVICE:-passport-ocr}' \
+                   HEALTH_URL='${HEALTH_URL:-http://127.0.0.1:8000/health}' \
+                   RUN_TESTS='$RUN_TESTS' \
+                   ./scripts/deploy.sh"
+
+      - name: Remove the deployment key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
