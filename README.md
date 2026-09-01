@@ -1,84 +1,226 @@
 # Document OCR Service
 
-A self-contained OCR microservice: upload an image, get back structured text
-with per-line geometry and confidence scores.
+A self-hosted OCR microservice. Upload an image over HTTP, get back structured
+text with per-line geometry, reading order and confidence scores. It runs
+entirely on open-source components — no paid OCR API, no cloud service, no
+outbound calls once the models are cached — so it can sit inside your own
+infrastructure and be called from any backend.
 
-Everything runs locally on open-source components. There are no paid OCR APIs,
-no external calls, and no cloud dependencies of any kind.
+It also ships a standalone ICAO 9303 machine-readable-zone (MRZ) parser for
+passports and travel documents, usable as a plain Python library independently
+of the HTTP service.
 
-```
-FastAPI  ->  OpenCV preprocessing  ->  OCRProvider (PaddleOCR)  ->  layout analysis  ->  JSON
-```
+![Python](https://img.shields.io/badge/python-3.9%2B-blue)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)
+![OCR](https://img.shields.io/badge/OCR-PaddleOCR-orange)
+![Tests](https://img.shields.io/badge/tests-470-brightgreen)
+![Lint](https://img.shields.io/badge/lint-ruff-black)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-> **Engine status.** Generic OCR infrastructure and parser are tested.
-> PaddleOCR package initialization was verified, but inference is
-> environment-dependent and must be validated on the target Linux server.
->
-> The service ships with two providers. `OCR_PROVIDER=stub` runs everything -
-> API, pipeline, layout, tests - without loading any model, and never imports
-> PaddleOCR at all. `OCR_PROVIDER=paddle` is the production engine. Switching
-> is one line in `.env`; see [Swapping the OCR engine](#swapping-the-ocr-engine)
-> and the [deployment guide](#production-deployment-ubuntu-2204--2404-no-docker).
+> **Engine status.** The generic OCR infrastructure and the MRZ parser are
+> covered by tests. PaddleOCR package initialization was verified, but
+> inference is environment-dependent and must be validated on the target Linux
+> server. The service ships a `stub` provider so the whole API, pipeline and
+> test-suite run without loading any model; switching to the real engine is one
+> line in `.env`.
 
 ---
 
 ## Table of contents
 
-1. [What it does](#what-it-does)
-2. [Requirements](#requirements)
-3. [Quick start](#quick-start)
-4. [First run and model download](#first-run-and-model-download)
-5. [Configuration](#configuration)
-6. [API reference](#api-reference)
-7. [Examples](#examples)
-8. [Architecture](#architecture)
-9. [Swapping the OCR engine](#swapping-the-ocr-engine)
-10. [Security and privacy](#security-and-privacy)
-11. [Error codes](#error-codes)
-12. [Testing](#testing)
-13. [Performance and concurrency](#performance-and-concurrency)
-14. [Production deployment (Ubuntu, no Docker)](#production-deployment-ubuntu-2204--2404-no-docker)
-15. [Deployment checklist](#deployment-checklist)
-16. [Troubleshooting](#troubleshooting)
-17. [Project layout](#project-layout)
+1. [Why?](#why)
+2. [Features](#features)
+3. [Architecture](#architecture)
+4. [Quick start](#quick-start)
+5. [API](#api)
+6. [cURL examples](#curl-examples)
+7. [Laravel / PHP integration](#laravel--php-integration)
+8. [Python integration](#python-integration)
+9. [Passport / MRZ parser](#passport--mrz-parser)
+10. [Deployment](#deployment)
+11. [Configuration](#configuration)
+12. [Performance and concurrency](#performance-and-concurrency)
+13. [Security and privacy](#security-and-privacy)
+14. [Testing](#testing)
+15. [Project structure](#project-structure)
+16. [Extending the OCR engine](#extending-the-ocr-engine)
+17. [Production deployment guide (detailed)](#production-deployment-ubuntu-2204--2404-no-docker)
+18. [Troubleshooting](#troubleshooting)
+19. [Roadmap](#roadmap)
+20. [Contributing](#contributing)
+21. [License](#license)
+22. [FAQ](#faq)
 
 ---
 
-## What it does
+## Why?
 
-* Accepts an image upload and returns every piece of text it can read.
-* Groups recognition boxes into **lines** (in reading order, right-to-left aware)
-  and optionally into paragraph-like **regions**.
-* Reports a **confidence score** per block, per line and for the page overall.
-* Preprocesses with OpenCV: perspective correction, downscaling, deskewing and
-  contrast enhancement, reporting exactly which steps it applied.
-* Supports multiple languages in one pass (English and Arabic are configured by
-  default; any PaddleOCR language works).
-* Never invents text. If nothing is readable, you get an empty result and a
-  warning, not a guess.
+Most OCR options push you toward a metered cloud API. That is a problem when
+the documents are invoices, contracts, identity papers or anything else you
+would rather not send to a third party — and it is a recurring cost that scales
+with your traffic.
+
+This project exists to make OCR an ordinary internal HTTP service:
+
+- **Self-hosted.** Runs on your own VPS. After the models are cached, no
+  outbound network calls are needed.
+- **No paid OCR API.** PaddleOCR and OpenCV, both open source.
+- **Arabic and English**, including mixed-script pages.
+- **Callable from any backend.** It is an HTTP API with an API key, so Laravel,
+  Django, Rails, Node or a cron job can all use it the same way.
+- **The OCR engine is swappable.** Application code depends on an
+  `OCRProvider` interface, not on PaddleOCR. A `stub` provider lets you develop
+  and test the whole service without downloading a single model.
+
+It is deliberately a *service*, not a library to embed: OCR is CPU- and
+memory-hungry, and keeping it in a separate process means your application
+stays responsive and can be scaled independently.
 
 ---
 
-## Requirements
+## Features
+
+### OCR
 
 | | |
 |---|---|
-| Python | 3.11+ recommended (3.9+ supported; verified on 3.9.6) |
-| RAM | 2 GB minimum, 4 GB recommended per worker |
-| Disk | ~230 MB for the English + Arabic models |
-| OS | Linux or macOS (verified on macOS arm64) |
+| Languages | English and Arabic, configurable per request |
+| Mixed script | Arabic and Latin on the same line are handled |
+| Reading order | Boxes are grouped into lines and ordered top-to-bottom |
+| RTL | Right-to-left lines are ordered right-to-left |
+| Geometry | Per-block 4-point polygon and axis-aligned bounding box |
+| Confidence | Per block, per line, and a page-level mean/min/max |
+| Regions | Optional paragraph-like grouping of adjacent lines |
+| Preprocessing | Perspective correction, downscale, deskew, contrast enhancement |
+| Orientation | Retries other page rotations when the first pass finds almost nothing |
+| Filtering | `min_confidence` drops low-scoring boxes, and reports how many |
 
-No system packages are needed beyond a working Python. `opencv-python-headless`
-avoids the X11/GUI libraries that the standard OpenCV wheel pulls in.
+The provider maps several other PaddleOCR language codes (`fr`, `german`, `es`,
+`ru`, `ch`, `japan`, `korean`), but only English and Arabic are exercised by the
+test-suite.
+
+Recognition never fabricates text. An unreadable page returns `200` with empty
+`text` and an explicit warning rather than a guess.
+
+### Passport / MRZ
+
+A standards-based parser for ICAO Doc 9303 machine-readable zones.
+
+| | |
+|---|---|
+| Formats | TD1 (3×30), TD2 (2×36), TD3 (2×44), MRV-A, MRV-B |
+| Validation | 7-3-1 check digits per field, plus the composite digit |
+| Fields | document code and category, issuing state, document number, nationality, birth date, sex, expiry date, optional data, personal number, surname, given names |
+| Per field | value, check-digit validity, confidence, and a list of errors |
+| Dates | `YYMMDD` resolved to ISO `YYYY-MM-DD` with century resolution |
+| Correction | Conservative, standards-driven OCR repair (see below) |
+| Extended numbers | Document numbers longer than 9 characters recovered from the optional-data field |
+
+> **The MRZ parser is standalone. It is *not* wired into
+> `POST /api/v1/ocr`.** That endpoint returns generic OCR output only — no
+> passport fields. To parse an MRZ today, call the library yourself with text
+> lines you already have. See [Passport / MRZ parser](#passport--mrz-parser).
+
+Correction is deliberately conservative: type coercion is applied only where
+the standard fixes a field's type, and check-digit-guided repair is accepted
+only when exactly one candidate validates. Where several candidates would
+validate, the original text is kept and the ambiguity is reported.
+
+### Production and security
+
+Only protections that are actually implemented:
+
+- API key authentication (`X-API-Key` or `Authorization: Bearer`), constant-time
+  comparison, multiple keys for rotation
+- Rate limiting per key, in-process or shared via Redis
+- Upload size limit enforced twice: on `Content-Length` and while streaming
+- Image type identified by **file signature**, not the client's `Content-Type`
+- Extension allow-list and a pixel-count ceiling (decompression-bomb guard)
+- Uploads processed in memory and discarded; nothing persisted unless
+  `STORE_UPLOADS` is explicitly enabled
+- Client filenames never used to name anything on disk
+- Log redaction: recognised text, filenames and API keys never reach the logs
+- No stack traces in HTTP responses
+- Security headers (`nosniff`, `DENY`, `no-referrer`, `no-store`)
+- systemd unit runs as a non-root user with a hardening profile
+- Nginx reverse proxy; the application binds to loopback only
+
+---
+
+## Architecture
+
+```
+Client
+  |
+  v
+Nginx  (TLS, rate limit, upload cap)
+  |
+  v
+FastAPI  (API key, rate limit, request id)
+  |
+  v
+OCR pipeline
+  |
+  +--> Image preprocessing   (OpenCV: perspective, downscale, deskew, enhance)
+  |
+  +--> OCR provider
+  |       |
+  |       +--> PaddleOCR     (production)
+  |       +--> Stub          (development and tests, loads no model)
+  |
+  +--> Layout analysis       (lines, reading order, RTL, regions)
+  |
+  v
+Structured JSON
+```
+
+```mermaid
+flowchart TD
+    A[Image upload] --> B[Validate: signature, size, pixels]
+    B --> C[OpenCV preprocessing]
+    C --> D{OCRProvider}
+    D -->|OCR_PROVIDER=paddle| E[PaddleOCR]
+    D -->|OCR_PROVIDER=stub| F[Stub provider]
+    E --> G[Layout analysis]
+    F --> G
+    G --> H[Structured JSON]
+```
+
+### The provider abstraction
+
+Nothing outside `app/services/ocr/` knows that PaddleOCR exists. The pipeline
+depends on `OCRProvider`, `OCRResult` and `TextBlock`. Two consequences matter
+in practice:
+
+- **Development needs no models.** `OCR_PROVIDER=stub` runs the entire service.
+  The test-suite asserts, in a subprocess, that this path never imports
+  `paddle`, `paddleocr` or `paddlex` at all.
+- **Adding an engine is additive.** Implement the interface, register it, set
+  `OCR_PROVIDER`. No API, schema or pipeline changes. See
+  [Extending the OCR engine](#extending-the-ocr-engine).
+
+Models are loaded **once per worker process** at application startup and reused
+for every request — never per request.
 
 ---
 
 ## Quick start
 
+Requires Python 3.9+ (3.11+ recommended). Verified on macOS arm64 and targeted
+at Ubuntu 22.04/24.04.
+
+### 1. Development, no models (fastest path)
+
 ```bash
-git clone <your-repo> ocr && cd ocr
-DEV=1 ./scripts/setup.sh      # creates .venv, installs deps, writes .env with a generated API key
-./scripts/run.sh              # starts on http://127.0.0.1:8000
+git clone <your-repo-url> ocr && cd ocr
+DEV=1 ./scripts/setup.sh          # creates .venv, installs deps, writes .env with a generated key
+```
+
+`scripts/setup.sh` generates an API key into `.env`. Then start with the stub
+provider:
+
+```bash
+OCR_PROVIDER=stub ./scripts/run.sh
 ```
 
 In another terminal:
@@ -87,18 +229,44 @@ In another terminal:
 ./scripts/smoke.sh
 ```
 
-Doing it by hand instead:
+> **What the stub does.** It returns only text a test explicitly scripted into
+> it, and nothing otherwise. Against a real image it returns empty `text` with
+> a `"no text was recognised in the image"` warning. That is intentional — it
+> never invents output. Use it to exercise the API, auth, limits and your own
+> client integration; use `paddle` to actually read images.
+
+### 2. Real OCR with PaddleOCR
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# set OCR_API_KEY in .env, then:
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+# in .env
+OCR_PROVIDER=paddle
+OCR_LANGUAGES=en,arabic
 ```
 
-Interactive API docs are at <http://127.0.0.1:8000/docs> when `DOCS_ENABLED=true`.
+```bash
+./scripts/run.sh
+```
+
+**First run downloads models.** PaddleOCR fetches detection and recognition
+models into `~/.paddlex/official_models` (or `PADDLE_PDX_CACHE_HOME`) the first
+time each language is used — roughly 230 MB for English plus Arabic on the
+configuration this project was developed against. That first start needs
+network access and can take several minutes; subsequent starts are fast and
+offline.
+
+Pre-download without starting the server:
+
+```bash
+.venv/bin/python -c "
+from app.services.ocr.registry import create_provider
+create_provider('paddle').warmup(['en', 'arabic'])
+"
+```
+
+PaddlePaddle wheel availability varies by platform and Python version. If the
+engine will not install or run on your machine, keep `OCR_PROVIDER=stub` for
+development and validate `paddle` on your Linux server — see
+[Troubleshooting](#troubleshooting).
 
 ### Scripts
 
@@ -111,160 +279,120 @@ Interactive API docs are at <http://127.0.0.1:8000/docs> when `DOCS_ENABLED=true
 
 ---
 
-## First run and model download
+## API
 
-PaddleOCR downloads its detection and recognition models the first time each
-language is used, cached in `~/.paddlex/official_models`. With
-`OCR_WARMUP_ON_STARTUP=true` (the default) this happens during startup, so the
-**first boot on a new machine needs network access and takes a few minutes**.
-Every boot after that is fast and fully offline.
+Interactive docs are served at `/docs` when `DOCS_ENABLED=true` (the default in
+`.env.example`; turn it off for public deployments).
 
-Measured model sizes for the default configuration:
+### Authentication
 
-| Model | Role | Size |
-|---|---|---|
-| `PP-OCRv6_medium_det` | English detection | 59 MB |
-| `PP-OCRv6_medium_rec` | English recognition | 73 MB |
-| `PP-OCRv5_server_det` | Arabic detection | 84 MB |
-| `arabic_PP-OCRv5_mobile_rec` | Arabic recognition | 7.8 MB |
-| `PP-LCNet_x1_0_textline_ori` | Text-line orientation | 6.6 MB |
-| | **Total (both languages)** | **231 MB** |
-
-To pre-download without starting the server:
-
-```bash
-.venv/bin/python -c "
-from app.services.ocr.registry import create_provider
-create_provider('paddle').warmup(['en', 'arabic'])
-"
-```
-
-To run the API without the OCR models at all — useful for integration work on
-the client side — set `OCR_PROVIDER=stub`. The stub returns only text it was
-explicitly scripted with, so it can never fabricate a result.
-
----
-
-## Configuration
-
-Everything is an environment variable, read from `.env` or the process
-environment. See [`.env.example`](.env.example) for the annotated full list.
-
-The ones that matter most:
-
-| Variable | Default | Notes |
-|---|---|---|
-| `OCR_API_KEY` | *(empty)* | **Set this.** Comma separated for zero-downtime rotation. Empty disables auth and logs a warning. |
-| `OCR_PROVIDER` | `paddle` | `paddle` or `stub`. |
-| `OCR_LANGUAGES` | `en,arabic` | Comma separated. Each language is a separate model in memory. |
-| `OCR_MAX_CONCURRENCY` | `1` | Concurrent inferences per worker. See [Performance](#performance-and-concurrency). |
-| `OCR_TIMEOUT_SECONDS` | `45` | Per-inference ceiling. |
-| `MAX_UPLOAD_SIZE` | `10485760` | Bytes. Enforced twice: on `Content-Length` and while streaming. |
-| `MAX_IMAGE_PIXELS` | `50000000` | Decompression-bomb guard. |
-| `RATE_LIMIT_REQUESTS` | `60` | Per `RATE_LIMIT_WINDOW_SECONDS`, per API key. |
-| `REDIS_URL` | *(unset)* | Optional. Without it the limiter is per-process. |
-| `WORKERS` | `1` | Each worker loads its own copy of the models. |
-| `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | |
-| `STORE_UPLOADS` | `false` | Images are processed in memory and discarded unless you turn this on. |
-
-Lists accept both `a,b,c` and `["a","b","c"]`.
-
----
-
-## API reference
-
-### `POST /api/v1/ocr`
-
-Recognise text in an image. Requires authentication.
-
-**Request** — `multipart/form-data`
-
-| Field | Type | Notes |
-|---|---|---|
-| `image` | file | **Required.** JPEG, PNG, WebP, BMP or TIFF. |
-
-**Query parameters** — all optional
-
-| Parameter | Type | Default | Notes |
-|---|---|---|---|
-| `languages` | string | `OCR_LANGUAGES` | Comma separated, e.g. `en,arabic`. Aliases like `ar` and `english` are accepted. |
-| `preprocess` | bool | `true` | Run the OpenCV chain. |
-| `detect_orientation` | bool | config | Retry other page rotations when the first pass finds almost nothing. |
-| `include_blocks` | bool | `true` | Include every raw recognition box. |
-| `include_regions` | bool | `false` | Include paragraph-like line groupings. |
-| `min_confidence` | float | `0.0` | Drop boxes below this score. |
-
-**Authentication** — either header works:
+Every call to `/api/v1/ocr` requires an API key. Either header works:
 
 ```
 X-API-Key: <key>
 Authorization: Bearer <key>
 ```
 
-**Response `200`**
+`/health`, `/ready` and `/api/v1/version` are unauthenticated.
+
+If `OCR_API_KEY` is empty the service runs unauthenticated and logs a warning
+at startup. Set it before exposing the service to anything.
+
+### `POST /api/v1/ocr`
+
+Recognise text in an image.
+
+**Request** — `multipart/form-data` with a single file field:
+
+| Field | Type | Notes |
+|---|---|---|
+| `image` | file | **Required.** JPEG, PNG, WebP, BMP or TIFF. |
+
+**Query parameters** — all optional. These are **query-string** parameters, not
+form fields; sending them in the multipart body has no effect.
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `languages` | string | `OCR_LANGUAGES` | Comma separated, e.g. `en,arabic`. Aliases such as `ar` and `english` are accepted. |
+| `preprocess` | bool | `true` | Run the OpenCV preprocessing chain. |
+| `detect_orientation` | bool | config | Retry other page orientations when the first pass finds little text. |
+| `include_blocks` | bool | `true` | Include every raw recognition box. |
+| `include_regions` | bool | `false` | Include paragraph-like line groupings. |
+| `min_confidence` | float | `0.0` | Drop boxes below this confidence (0.0–1.0). |
+
+**Response `200`** — this is a real response body from the service:
 
 ```json
 {
   "success": true,
-  "request_id": "f4ced2f6bfcb444ebb9753246fa0c061",
-  "text": "INVOICE 2026-09\nTOTAL 1240.00",
-  "languages": ["en"],
-  "confidence": { "mean": 0.94, "min": 0.88, "max": 0.99 },
+  "request_id": "2321f684da7a43afbd956f090e6babc3",
+  "text": "INVOICE 2026-09-01\nTOTAL 1240.00 USD",
+  "languages": ["en", "arabic"],
+  "confidence": { "mean": 0.9936, "min": 0.9923, "max": 0.9949 },
   "line_count": 2,
-  "word_count": 4,
+  "word_count": 5,
   "lines": [
     {
-      "text": "INVOICE 2026-09",
-      "confidence": 0.97,
-      "min_confidence": 0.95,
+      "text": "INVOICE 2026-09-01",
+      "confidence": 0.9949,
+      "min_confidence": 0.9949,
       "languages": ["en"],
-      "bbox": { "x": 40, "y": 40, "width": 250, "height": 22 }
+      "bbox": { "x": 47.0, "y": 42.0, "width": 493.0, "height": 54.0 }
+    }
+  ],
+  "regions": [
+    {
+      "text": "INVOICE 2026-09-01\nTOTAL 1240.00 USD",
+      "confidence": 0.9936,
+      "line_count": 2,
+      "bbox": { "x": 43.0, "y": 42.0, "width": 497.0, "height": 164.0 }
     }
   ],
   "blocks": [
     {
-      "text": "INVOICE",
-      "confidence": 0.99,
+      "text": "INVOICE 2026-09-01",
+      "confidence": 0.9949,
       "lang": "en",
-      "bbox": { "x": 40, "y": 40, "width": 120, "height": 22 },
-      "polygon": [[40, 40], [160, 40], [160, 62], [40, 62]]
+      "bbox": { "x": 47.0, "y": 42.0, "width": 493.0, "height": 54.0 },
+      "polygon": [[47.0, 42.0], [540.0, 42.0], [540.0, 96.0], [47.0, 96.0]]
     }
   ],
   "image": {
     "format": "image/png",
-    "size_bytes": 84213,
-    "original_width": 1100,
-    "original_height": 700,
-    "processed_width": 1100,
-    "processed_height": 700
+    "size_bytes": 2642,
+    "original_width": 1200,
+    "original_height": 410,
+    "processed_width": 1200,
+    "processed_height": 410
   },
   "preprocessing": {
-    "steps": ["deskew", "enhance"],
+    "steps": ["enhance"],
     "scale": 1.0,
     "rotation": 0,
-    "skew_angle": -0.8,
+    "skew_angle": 0.0,
     "perspective_corrected": false
   },
-  "timings_ms": { "decode_ms": 12.1, "preprocess_ms": 96.0, "ocr_ms": 812.4, "layout_ms": 0.3 },
-  "processing_time_ms": 921.7,
+  "timings_ms": { "decode_ms": 3.6, "preprocess_ms": 95.5, "ocr_ms": 0.3, "layout_ms": 0.1 },
+  "processing_time_ms": 99.7,
   "warnings": []
 }
 ```
 
-Notes on the response:
+Notes that matter when consuming this:
 
-* **Coordinates** are in the *processed* image space. When preprocessing rescales
+- **Coordinates are in the processed image space.** When preprocessing rescales
   or warps the page, `processed_width`/`processed_height` and `preprocessing`
-  tell you the relationship to the original.
-* **`languages`** lists the models that were run, even if one contributed no text.
-* **`warnings`** is where partial success is reported: low confidence, dropped
-  blocks, a language that failed, or nothing readable at all. A request that
-  produces no text is still a `200` — an unreadable image is a result, not an error.
+  describe the relationship to the original.
+- **`languages` lists the models that ran**, even if one contributed no text.
+- **`regions` and `blocks` are omitted** unless requested/enabled.
+- **`warnings` is where partial success is reported** — low confidence, dropped
+  blocks, a language that failed, or nothing readable. An unreadable image is
+  still a `200`: it is a result, not an error.
 
 ### `GET /health`
 
-Liveness. No authentication. Deliberately does not touch the OCR engine, so a
-slow model load cannot make a healthy process look dead.
+Liveness. Does not touch the OCR engine, so a slow model load cannot make a
+healthy process look dead.
 
 ```json
 { "status": "ok" }
@@ -272,15 +400,16 @@ slow model load cannot make a healthy process look dead.
 
 ### `GET /ready`
 
-Readiness. No authentication. Returns `503` while the models are still loading.
+Readiness. Returns `503` while models are still loading.
 
 ```json
-{ "status": "ready", "ocr_ready": true, "provider": "paddleocr", "languages": ["en", "arabic"] }
+{ "status": "ready", "ocr_ready": true, "provider": "paddle", "languages": ["en", "arabic"] }
 ```
 
-### `GET /api/v1/version`
+`provider` echoes the configured `OCR_PROVIDER`; `/api/v1/version` reports the
+engine object that is actually loaded.
 
-Version, engine state and the effective limits. No authentication.
+### `GET /api/v1/version`
 
 ```json
 {
@@ -288,189 +417,34 @@ Version, engine state and the effective limits. No authentication.
   "version": "1.0.0",
   "api_version": "v1",
   "environment": "production",
-  "ocr": { "provider": "paddleocr", "ready": true, "languages": ["en", "arabic"], "concurrency": 1 },
-  "limits": { "max_upload_size": 10485760, "rate_limit_requests": 60 }
+  "ocr": {
+    "provider": "paddleocr",
+    "ready": true,
+    "languages": ["en", "arabic"],
+    "loaded_languages": ["arabic", "en"],
+    "available_providers": ["paddle", "paddleocr", "stub"],
+    "concurrency": 1
+  },
+  "limits": {
+    "max_upload_size": 10485760,
+    "max_image_pixels": 50000000,
+    "allowed_mime_types": ["image/jpeg", "image/png", "image/webp", "image/bmp", "image/tiff"],
+    "rate_limit_requests": 60,
+    "rate_limit_window_seconds": 60,
+    "ocr_timeout_seconds": 45.0
+  }
 }
 ```
 
----
-
-## Examples
-
-```bash
-# Basic
-curl -X POST http://127.0.0.1:8000/api/v1/ocr \
-  -H "X-API-Key: $OCR_API_KEY" \
-  -F "image=@page.jpg"
-
-# Arabic + English, paragraphs, no raw boxes
-curl -X POST "http://127.0.0.1:8000/api/v1/ocr?languages=en,arabic&include_regions=true&include_blocks=false" \
-  -H "X-API-Key: $OCR_API_KEY" \
-  -F "image=@page.jpg"
-
-# Only high-confidence text, no preprocessing
-curl -X POST "http://127.0.0.1:8000/api/v1/ocr?min_confidence=0.8&preprocess=false" \
-  -H "X-API-Key: $OCR_API_KEY" \
-  -F "image=@page.jpg"
-
-# Just the plain text
-curl -s -X POST http://127.0.0.1:8000/api/v1/ocr \
-  -H "X-API-Key: $OCR_API_KEY" \
-  -F "image=@page.jpg" | python3 -c "import json,sys; print(json.load(sys.stdin)['text'])"
-```
-
-Python:
-
-```python
-import requests
-
-with open("page.jpg", "rb") as fh:
-    response = requests.post(
-        "http://127.0.0.1:8000/api/v1/ocr",
-        headers={"X-API-Key": "..."},
-        files={"image": ("page.jpg", fh, "image/jpeg")},
-        params={"languages": "en,arabic"},
-        timeout=60,
-    )
-
-response.raise_for_status()
-result = response.json()
-print(result["text"])
-for line in result["lines"]:
-    print(f"{line['confidence']:.2f}  {line['text']}")
-```
-
----
-
-## Architecture
-
-```
-                  HTTP request
-                       |
-        RequestContextMiddleware      request id, timing
-        MaxBodySizeMiddleware         Content-Length guard
-        SecurityHeadersMiddleware     nosniff, no-store, ...
-                       |
-        require_api_key -> enforce_rate_limit
-                       |
-              POST /api/v1/ocr
-                       |
-         streaming read with a byte ceiling
-                       |
-   +---------------- pipeline -----------------+
-   |  loader      validate + decode (in memory)|
-   |  preprocess  perspective, scale, deskew,  |
-   |              enhance                      |
-   |  engine      OCRProvider per language     |
-   |  layout      lines, reading order, regions|
-   +-------------------------------------------+
-                       |
-              Pydantic response model
-```
-
-Design decisions worth knowing:
-
-* **Models load once.** `OCREngine.startup()` warms every configured language
-  during application startup and the provider instances live for the process
-  lifetime. Nothing loads a model per request.
-* **Inference runs in a bounded thread pool.** PaddleOCR inference is blocking
-  C++ work, so it cannot run on the event loop. The pool is deliberately small
-  (`OCR_MAX_CONCURRENCY`) because each concurrent inference multiplies peak
-  memory and oversubscribes the CPU.
-* **Languages run sequentially** within one request, for the same reason.
-* **Nothing touches the disk.** Upload bytes go straight from the request into a
-  numpy array. `app/utils/files.py` provides secure temp-file handling for
-  callers that need it (random names, `0600`, overwrite-then-unlink) and an
-  opt-in store behind `STORE_UPLOADS`.
-* **Failure is partial, not total.** A language that fails, a block below
-  threshold or an unreadable page all produce a `200` with a warning. Only a
-  genuinely unusable request is an error.
-
----
-
-## Swapping the OCR engine
-
-Nothing outside `app/services/ocr/` knows that PaddleOCR exists. To add an
-engine, implement `OCRProvider` and register it:
-
-```python
-from app.services.ocr.base import OCRProvider, OCRResult, TextBlock
-from app.services.ocr.registry import register_provider
-
-
-class MyEngineProvider(OCRProvider):
-    name = "myengine"
-
-    def supported_languages(self):
-        return ["en"]
-
-    def warmup(self, languages=None):
-        self._model = load_my_model()      # called once, at startup
-
-    def is_ready(self):
-        return getattr(self, "_model", None) is not None
-
-    def recognize(self, image, lang="en"):  # image is a BGR numpy array
-        blocks = [
-            TextBlock(text=item.text, confidence=item.score, polygon=item.quad, lang=lang)
-            for item in self._model.run(image)
-        ]
-        return OCRResult(blocks=blocks, lang=lang, provider=self.name)
-
-
-register_provider("myengine", MyEngineProvider)
-```
-
-Then set `OCR_PROVIDER=myengine`. The API, pipeline, schemas and tests are
-unchanged. `tests/test_ocr_provider.py::test_a_new_provider_can_be_registered`
-exercises exactly this path.
-
-The PaddleOCR adapter introspects the installed version's constructor and call
-signatures, so it works across the 2.x and 3.x APIs without pinning you to one.
-
----
-
-## Security and privacy
-
-* **API key authentication** on the OCR endpoint, compared in constant time,
-  supporting multiple keys for rotation. Probes stay unauthenticated.
-* **Rate limiting** per key (falling back to client address), in-process by
-  default or shared through Redis. A Redis outage degrades to the in-process
-  limiter rather than taking the service down.
-* **Upload validation**: size checked against `Content-Length` *and* while
-  streaming, type identified by **file signature** rather than the client's
-  `Content-Type`, extension allow-list, pixel-count ceiling and a minimum
-  dimension check.
-* **The client's filename is never used** to name anything. Temp files get
-  random 32-hex names, `0600` permissions, and are overwritten before being
-  unlinked. Orphans from a crashed worker are swept at startup.
-* **Images are not persisted** unless `STORE_UPLOADS=true` is set deliberately.
-* **Logs never contain document content.** The formatter redacts a list of
-  sensitive keys, summarises raw bytes as `<n bytes>`, and scrubs long
-  machine-readable runs out of messages. Recognised text, client filenames and
-  API keys are never logged. `LOG_SENSITIVE_DATA` can lift this for local
-  debugging and warns loudly at startup when it is on.
-* **No stack traces leave the process.** Unhandled exceptions are logged with
-  their traceback and answered with a generic `PROCESSING_ERROR`.
-* **CORS is off by default.** Set `ALLOWED_ORIGINS` only if a browser calls the
-  API directly; server-to-server callers do not need it.
-* Responses are `Cache-Control: no-store`, plus `nosniff`, `DENY` and
-  `no-referrer`.
-
-If you put this behind a reverse proxy, set `TRUST_PROXY_HEADERS=true` — but
-only then, or `X-Forwarded-For` becomes a way to walk around the rate limiter.
-
----
-
-## Error codes
+### Errors
 
 Every failure returns the same envelope:
 
 ```json
 {
   "success": false,
-  "error": { "code": "UNSUPPORTED_FORMAT", "message": "Image type 'application/pdf' is not allowed" },
-  "request_id": "9e9f9fcb2fc741a3bc63b3eb3a16a652"
+  "error": { "code": "INVALID_IMAGE", "message": "The image could not be decoded" },
+  "request_id": "ae4789fed54a4ba4bd0c5838e3f3f4ff"
 }
 ```
 
@@ -488,129 +462,768 @@ Every failure returns the same envelope:
 | `SERVICE_UNAVAILABLE` | 503 | The engine is not loaded yet |
 | `PROCESSING_ERROR` | 500 | Anything unexpected |
 
-`request_id` is echoed in the `X-Request-ID` header and appears in every log
-line for that request — quote it when reporting a problem.
+The `ErrorCode` enum also defines `MRZ_NOT_FOUND`, `MRZ_INVALID`,
+`LOW_CONFIDENCE` and `NO_DATA_EXTRACTED`. They are reserved for future use and
+are **not** currently returned by any endpoint.
+
+### Request IDs
+
+Every response carries `X-Request-ID` (and `X-Process-Time-Ms`). The same id
+appears in `request_id` in the body and in every log line for that request.
+Send your own `X-Request-ID` and it is preserved. Quote it when reporting a
+problem.
+
+---
+
+## cURL examples
+
+```bash
+# Basic OCR
+curl -X POST http://127.0.0.1:8000/api/v1/ocr \
+  -H "X-API-Key: $OCR_API_KEY" \
+  -F "image=@invoice.jpg"
+
+# Arabic + English, paragraphs, without the raw boxes
+curl -X POST "http://127.0.0.1:8000/api/v1/ocr?languages=en,arabic&include_regions=true&include_blocks=false" \
+  -H "X-API-Key: $OCR_API_KEY" \
+  -F "image=@document.jpg"
+
+# Only high-confidence text, no preprocessing
+curl -X POST "http://127.0.0.1:8000/api/v1/ocr?min_confidence=0.8&preprocess=false" \
+  -H "X-API-Key: $OCR_API_KEY" \
+  -F "image=@scan.png"
+
+# Plain text only
+curl -s -X POST http://127.0.0.1:8000/api/v1/ocr \
+  -H "X-API-Key: $OCR_API_KEY" \
+  -F "image=@invoice.jpg" | python3 -c "import json,sys; print(json.load(sys.stdin)['text'])"
+
+# Line-by-line with confidence
+curl -s -X POST http://127.0.0.1:8000/api/v1/ocr \
+  -H "X-API-Key: $OCR_API_KEY" \
+  -F "image=@invoice.jpg" \
+  | python3 -c "
+import json,sys
+for l in json.load(sys.stdin)['lines']:
+    print(f\"{l['confidence']:.3f}  {l['text']}\")"
+```
+
+---
+
+## Laravel / PHP integration
+
+### Recommended architecture
+
+Keep the two concerns apart:
+
+```
+Laravel            ->  users, auth, database, workflows, queues, business rules
+Python OCR service ->  OCR only
+```
+
+Laravel calls the OCR service over HTTP, stores whatever it needs, and never
+loads an OCR model into a PHP process. Run the OCR call inside a queued job:
+recognition takes seconds, which is too long for a web request.
+
+### `.env`
+
+```dotenv
+OCR_SERVICE_URL=http://127.0.0.1:8000
+OCR_SERVICE_KEY=your-generated-api-key
+```
+
+### `config/services.php`
+
+```php
+'ocr' => [
+    'url'     => env('OCR_SERVICE_URL', 'http://127.0.0.1:8000'),
+    'key'     => env('OCR_SERVICE_KEY'),
+    'timeout' => env('OCR_SERVICE_TIMEOUT', 120),
+],
+```
+
+### Service class
+
+> **Important:** `languages`, `min_confidence` and the other options are
+> **query-string** parameters. Passing them as the second argument to `post()`
+> would send them as multipart form fields, which the API ignores — the request
+> would silently fall back to the server's configured defaults. Put them in the
+> URL, as below.
+
+```php
+<?php
+
+namespace App\Services;
+
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Facades\Http;
+use RuntimeException;
+
+class OcrService
+{
+    public function recognise(string $path, array $options = []): array
+    {
+        $query = http_build_query(array_merge([
+            'languages' => 'en,arabic',
+        ], $options));
+
+        $url = rtrim(config('services.ocr.url'), '/') . '/api/v1/ocr?' . $query;
+
+        $handle = fopen($path, 'r');
+
+        try {
+            $response = Http::withHeaders([
+                    'X-API-Key' => config('services.ocr.key'),
+                ])
+                ->timeout(config('services.ocr.timeout'))
+                ->attach('image', $handle, basename($path))
+                ->post($url);
+        } catch (ConnectionException $e) {
+            throw new RuntimeException('OCR service unreachable: ' . $e->getMessage(), 0, $e);
+        } finally {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+        }
+
+        if ($response->failed()) {
+            // The service always returns {success, error: {code, message}, request_id}
+            throw new RuntimeException(sprintf(
+                'OCR failed [%s]: %s (request %s)',
+                $response->json('error.code', 'HTTP_' . $response->status()),
+                $response->json('error.message', 'unknown error'),
+                $response->json('request_id', '-')
+            ));
+        }
+
+        return $response->json();
+    }
+}
+```
+
+### Using the result
+
+```php
+$result = app(OcrService::class)->recognise(storage_path('app/invoice.jpg'));
+
+$text  = $result['text'];                    // full text, newline separated
+$mean  = $result['confidence']['mean'];      // page-level mean confidence
+$lines = $result['lines'];                   // per line: text, confidence, bbox
+
+foreach ($lines as $line) {
+    logger()->info(sprintf('%.3f  %s', $line['confidence'], $line['text']));
+}
+
+// Partial success is reported, not thrown
+foreach ($result['warnings'] as $warning) {
+    logger()->warning('OCR warning: ' . $warning);
+}
+```
+
+Or with the `Http` facade directly, matching the response fields exactly:
+
+```php
+$response = Http::withHeaders([
+        'X-API-Key' => config('services.ocr.key'),
+    ])
+    ->attach('image', fopen($path, 'r'), basename($path))
+    ->post(config('services.ocr.url') . '/api/v1/ocr?languages=en,arabic');
+
+$response->json('text');                 // "INVOICE 2026-09-01\nTOTAL 1240.00 USD"
+$response->json('lines');                // array of lines with bbox + confidence
+$response->json('confidence.mean');      // 0.9936
+$response->json('request_id');           // correlate with the service logs
+```
+
+### Queued job
+
+```php
+class ExtractDocumentText implements ShouldQueue
+{
+    public int $timeout = 180;   // must exceed the HTTP client timeout
+    public int $tries = 3;
+
+    public function __construct(public Document $document) {}
+
+    public function handle(OcrService $ocr): void
+    {
+        $result = $ocr->recognise(Storage::path($this->document->path));
+
+        $this->document->update([
+            'text'       => $result['text'],
+            'confidence' => $result['confidence']['mean'],
+        ]);
+    }
+}
+```
+
+Keep the Laravel HTTP timeout comfortably above the service's
+`OCR_TIMEOUT_SECONDS` (45 by default), and the job timeout above that again.
+
+---
+
+## Python integration
+
+```python
+import requests
+
+with open("invoice.jpg", "rb") as fh:
+    response = requests.post(
+        "http://127.0.0.1:8000/api/v1/ocr",
+        headers={"X-API-Key": "your-api-key"},
+        files={"image": ("invoice.jpg", fh, "image/jpeg")},
+        params={"languages": "en,arabic", "include_blocks": "false"},
+        timeout=120,
+    )
+
+response.raise_for_status()
+result = response.json()
+
+print(result["text"])
+for line in result["lines"]:
+    print(f"{line['confidence']:.3f}  {line['text']}")
+```
+
+With `httpx`, including error handling that uses the service's envelope:
+
+```python
+import httpx
+
+with httpx.Client(timeout=120.0) as client:
+    with open("invoice.jpg", "rb") as fh:
+        response = client.post(
+            "http://127.0.0.1:8000/api/v1/ocr",
+            headers={"X-API-Key": "your-api-key"},
+            files={"image": ("invoice.jpg", fh, "image/jpeg")},
+            params={"languages": "en,arabic"},
+        )
+
+if response.status_code != 200:
+    error = response.json()["error"]
+    raise RuntimeError(f"{error['code']}: {error['message']}")
+
+print(response.json()["text"])
+```
+
+---
+
+## Passport / MRZ parser
+
+### OCR and MRZ parsing are two different problems
+
+```
+OCR:         image      ->  text
+MRZ parser:  text lines ->  validated, structured travel-document data
+```
+
+The MRZ parser takes **text lines you already have** and returns structured
+fields with per-field validity and confidence. It does not read images.
+
+**It is not connected to `POST /api/v1/ocr`.** That endpoint returns generic
+OCR output only. To use the parser today, call it as a library — optionally
+feeding it lines that came from this service's own OCR output.
+
+### Independence
+
+The parser imports nothing from FastAPI, the OCR engines, or the image
+pipeline — and needs neither OpenCV nor NumPy. The test-suite enforces this in a
+subprocess, asserting that importing and running the parser pulls in no
+`fastapi`, `starlette`, `app.api`, `app.services.ocr`, `numpy` or `cv2`.
+
+So you can vendor `app/services/mrz/` into another project, or use it here
+without ever starting the HTTP service.
+
+### Usage
+
+```python
+from app.services.mrz import create_parser
+
+parser = create_parser("icao9303")
+
+document = parser.parse_lines(
+    [
+        "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<",
+        "L898902C36UTO7408122F1204159ZE184226B<<<<<10",
+    ],
+    ocr_confidence=0.94,
+)
+
+if document is None:
+    raise ValueError("no machine-readable zone in those lines")
+
+print(document.mrz_type)                      # "TD3"
+print(document.valid)                          # True
+print(document.value("document_number"))       # "L898902C3"
+print(document.confidence_of("document_number"))
+print(document.is_valid("document_number"))    # True (its check digit agrees)
+print(document.full_name)                      # "ANNA MARIA ERIKSSON"
+```
+
+The lines above are the worked specimen published in ICAO Doc 9303 itself
+(`UTO` is the reserved code for the fictional state "Utopia"). No real document
+data appears anywhere in this repository.
+
+To find a zone inside a larger blob of text — for example the `text` field
+returned by this service's OCR endpoint:
+
+```python
+document = parser.parse_text(ocr_result["text"], ocr_confidence=0.94)
+```
+
+Both entry points return `None` when the input does not contain a parsable
+zone. They never return a partially invented document.
+
+### The structured result
+
+Every field carries four independent things: the value, whether the standard's
+own check digit confirms it, a confidence, and any errors.
+
+```python
+field = document.get("birth_date")
+field.value        # "1974-08-12"  (ISO, century resolved)
+field.raw          # "740812"      (as printed in the zone)
+field.valid        # True | False | None  (None = the standard defines no check)
+field.confidence   # 0.9653
+field.errors       # []
+field.corrected    # False
+```
+
+Real output for the specimen above:
+
+| Field | Value | Check digit | Confidence |
+|---|---|---|---|
+| `document_code` | `P` | n/a | 0.8372 |
+| `document_category` | `passport` | n/a | 0.8372 |
+| `issuing_state` | `UTO` | n/a | 0.8372 |
+| `document_number` | `L898902C3` | valid | 0.9653 |
+| `nationality` | `UTO` | n/a | 0.8372 |
+| `birth_date` | `1974-08-12` | valid | 0.9653 |
+| `sex` | `F` | n/a | 0.8372 |
+| `expiry_date` | `2012-04-15` | valid | 0.9653 |
+| `optional_data` | `ZE184226B` | valid | 0.9653 |
+| `personal_number` | `ZE184226B` | valid | 0.9653 |
+| `surname` | `ERIKSSON` | n/a | 0.8372 |
+| `given_names` | `ANNA MARIA` | n/a | 0.8372 |
+
+Document-level results:
+
+```python
+document.check_digits      # {"document_number": True, "birth_date": True, ...}
+document.check_digits_valid
+document.structure_valid
+document.confidence        # 0.985
+document.errors            # conditions that make the zone untrustworthy
+document.warnings
+document.corrections       # conservative repairs that were applied, for audit
+document.to_dict()         # raw zone text withheld unless include_raw=True
+document.to_flat_dict()    # just the values
+document.summary()         # short, non-disclosing, safe to log
+```
+
+`to_dict()` omits the raw zone lines by default — they reproduce the whole zone
+in one string, so callers have to ask for them explicitly.
+
+### What "never invents a value" means here
+
+- A field that cannot be read is `None` with a recorded reason, never a guess.
+- A field whose check digit disagrees is returned **as read**, flagged invalid,
+  with low confidence — neither silently corrected nor silently dropped.
+- Where two different single-character corrections would both satisfy a check
+  digit, neither is applied and the ambiguity is reported.
+- A calendar contradiction (for example an expiry date before the birth date)
+  overrides a passing check digit: the digit only proves the characters were
+  read correctly, not that the date is possible.
+
+### Synthetic fixtures
+
+The package ships a generator so you can build valid zones for testing without
+touching a real document:
+
+```python
+from app.services.mrz import build_mrz
+
+lines = build_mrz({
+    "document_code": "P",
+    "issuing_state": "UTO",
+    "surname": "SPECIMEN",
+    "given_names": "SAMPLE TEST",
+    "document_number": "AB1234567",
+    "nationality": "UTO",
+    "birth_date": "800101",
+    "sex": "M",
+    "expiry_date": "301231",
+}, "TD3")
+```
+
+Every check digit is computed correctly, so the result round-trips through the
+parser.
+
+---
+
+## Deployment
+
+Recommended production topology, no Docker required:
+
+```
+Internet
+   |
+Nginx :443          TLS, rate limit, upload cap, security headers
+   |
+Uvicorn :8000       loopback only, managed by systemd, non-root user
+   |
+FastAPI + PaddleOCR
+```
+
+- **Ubuntu 22.04 / 24.04**, Python 3.11+, virtualenv
+- **systemd** for process management, restart and resource limits
+- **Nginx** as the only public entry point; the app binds `127.0.0.1`
+- **Let's Encrypt** for TLS (optional but recommended)
+- **Redis** optional — only needed to share rate limits across workers
+- Model cache kept under the application directory and owned by the service user
+
+Deployment artifacts in this repository:
+
+| File | Purpose |
+|---|---|
+| [`deploy/passport-ocr.service`](deploy/passport-ocr.service) | systemd unit: loopback bind, env file, hardening profile, memory cap |
+| [`deploy/nginx.conf`](deploy/nginx.conf) | Reverse proxy: TLS, rate limiting, upload cap, timeouts |
+| [`.env.production.example`](.env.production.example) | Production configuration template |
+
+The full step-by-step guide — server preparation, packages, service user,
+permissions, systemd, Nginx, HTTPS, firewall, health checks, logs, restart and
+update procedures, plus a deployment checklist — is in
+[Production deployment](#production-deployment-ubuntu-2204--2404-no-docker)
+below.
+
+---
+
+## Configuration
+
+Every setting is an environment variable, read from `.env` or the process
+environment. [`.env.example`](.env.example) documents all of them;
+[`.env.production.example`](.env.production.example) is the production
+template. The table below covers the ones that matter most.
+
+### Engine
+
+| Variable | Default | Notes |
+|---|---|---|
+| `OCR_PROVIDER` | `paddle` | `paddle` or `stub`. `stub` loads no model and never imports PaddleOCR. |
+| `OCR_LANGUAGES` | `en,arabic` | Comma separated. Each language is a separate model **and** a separate pass over every image. |
+| `OCR_MAX_CONCURRENCY` | `1` | Concurrent inferences per worker. |
+| `OCR_CPU_THREADS` | `1` | Inference threads inside one predictor. |
+| `OCR_TIMEOUT_SECONDS` | `45.0` | Per-inference ceiling. |
+| `OCR_WARMUP_ON_STARTUP` | `true` | Load models at startup rather than on the first request. |
+| `OCR_DET_LIMIT_SIDE_LEN` | `1600` | Detection input size cap. |
+| `OCR_DROP_SCORE` | `0.35` | Engine-level recognition score floor. |
+| `OCR_USE_GPU` | `false` | GPU is not covered by this project's tests or docs. |
+| `OCR_MODEL_DIR` | *(unset)* | Explicit model directory. |
+| `OCR_DET_MODEL_NAME` | *(unset)* | Override the detection model (PaddleOCR 3.x). |
+| `OCR_REC_MODEL_NAME` | *(unset)* | Override the recognition model. Recognition models are script-specific — use `en:MODEL,arabic:MODEL` when more than one language is configured. |
+
+### Security and limits
+
+| Variable | Default | Notes |
+|---|---|---|
+| `OCR_API_KEY` | *(empty)* | **Set this.** Comma separated for rotation. Empty disables auth and logs a warning. |
+| `API_KEY_HEADER` | `X-API-Key` | |
+| `MAX_UPLOAD_SIZE` | `10485760` | Bytes. Enforced on `Content-Length` and while streaming. |
+| `MIN_UPLOAD_SIZE` | `256` | |
+| `MAX_IMAGE_PIXELS` | `50000000` | Decompression-bomb guard. |
+| `ALLOWED_MIME_TYPES` | jpeg, png, webp, bmp, tiff | Checked against the file signature. |
+| `ALLOWED_EXTENSIONS` | `.jpg,.jpeg,.png,...` | |
+| `RATE_LIMIT_ENABLED` | `true` | |
+| `RATE_LIMIT_REQUESTS` | `60` | Per `RATE_LIMIT_WINDOW_SECONDS`, per API key. |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | |
+| `REDIS_URL` | *(unset)* | Optional. Without it the limiter is per-process. |
+| `STORE_UPLOADS` | `false` | Images are discarded unless this is explicitly enabled. |
+| `STORE_UPLOADS_DIR` | `./data/uploads` | |
+| `TRUST_PROXY_HEADERS` | `false` | Enable **only** behind a reverse proxy. |
+| `ALLOWED_ORIGINS` | *(empty)* | Empty means no CORS headers — correct for server-to-server. |
+| `ALLOWED_HOSTS` | `*` | |
+| `DOCS_ENABLED` | `true` | Turn off for public deployments. |
+
+### Server, imaging and logging
+
+| Variable | Default | Notes |
+|---|---|---|
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | |
+| `WORKERS` | `1` | Each worker loads its **own** copy of every model. |
+| `ROOT_PATH` | *(empty)* | For serving under a path prefix. |
+| `TEMP_DIR` | OS temp dir | Only used when a caller explicitly materialises a temp file. |
+| `IMAGE_MAX_DIMENSION` | `2200` | Long side cap before OCR. |
+| `IMAGE_MIN_DIMENSION` | `320` | Below this an upload is rejected. |
+| `ENABLE_PERSPECTIVE_CORRECTION` | `true` | |
+| `ENABLE_DESKEW` | `true` | |
+| `ENABLE_ORIENTATION_CORRECTION` | `true` | |
+| `INCLUDE_RAW_BLOCKS_DEFAULT` | `true` | Default for `include_blocks`. |
+| `MIN_OVERALL_CONFIDENCE` | `0.55` | Below this the response gets a low-confidence warning. |
+| `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | `json` or `console`. |
+| `LOG_SENSITIVE_DATA` | `false` | **Never enable in production** — it unmasks document content in the logs. |
+| `ENVIRONMENT` / `DEBUG` | `development` / `false` | |
+
+Lists accept both `a,b,c` and `["a","b","c"]`.
+
+---
+## Performance and concurrency
+
+OCR is CPU-bound and memory-hungry. Two facts drive every sizing decision:
+
+- **Models load once per worker process**, at startup, and are reused for every
+  request. Nothing loads a model per request.
+- **Every worker loads its own copy of every model.** Four workers with two
+  languages means eight models resident. More workers is not automatically
+  better.
+- **Each configured language is a separate full pass over the image.** Running
+  `en,arabic` costs roughly the sum of both, so list only what you need and let
+  callers narrow it further with `?languages=`.
+
+Inference itself is blocking C++ work, so it runs in a bounded thread pool
+sized by `OCR_MAX_CONCURRENCY`. That ceiling is deliberately low: parallel
+inference inside one process multiplies peak memory and usually makes *both*
+requests slower.
+
+### Sizing
+
+| Machine | Suggested starting point |
+|---|---|
+| 2 vCPU / 4 GB | `WORKERS=1`, `OCR_MAX_CONCURRENCY=1` |
+| 4 vCPU / 8 GB | `WORKERS=2`, `OCR_MAX_CONCURRENCY=1` |
+| 8 vCPU / 16 GB | `WORKERS=3`, `OCR_MAX_CONCURRENCY=2` |
+
+Start at `WORKERS=1` and raise it only while you have RAM headroom. Use
+`REDIS_URL` once you run more than one worker, or each worker will enforce the
+rate limit independently.
+
+`scripts/run.sh` pins `OMP_NUM_THREADS=1` (and the OpenBLAS/MKL equivalents).
+Without that, the math libraries spawn one thread per core inside every worker
+and the workers fight each other.
+
+### About numbers
+
+Any latency or memory figures in this repository were observed on a **single
+development machine** and are indicative only. Inference performance is
+strongly environment-dependent — CPU, model variant, image size and language
+count all move it substantially. **Measure on your own server before sizing
+anything**; step 4 of the deployment guide walks through validating the engine
+on the target host.
+
+No production latency is promised here.
+
+---
+
+## Security and privacy
+
+Implemented protections. This is a description of what the code does, not a
+guarantee of security — review it against your own threat model.
+
+**Authentication and abuse**
+
+- API key on `/api/v1/ocr`, compared in constant time, multiple keys supported
+  for rotation. Probes stay unauthenticated.
+- Rate limiting per key, falling back to client address. Redis-backed when
+  `REDIS_URL` is set; a Redis outage degrades to the in-process limiter rather
+  than taking the service down.
+
+**Uploads**
+
+- Size checked against `Content-Length` *and* while streaming, so a client that
+  lies about or omits the header still cannot make the process allocate past
+  the limit.
+- Type identified by **file signature**, not the client's `Content-Type`.
+- Extension allow-list, pixel-count ceiling, minimum dimension check.
+
+**Data handling**
+
+- Uploads are decoded straight into memory and discarded. Nothing is written to
+  disk unless `STORE_UPLOADS=true` is set deliberately.
+- The client's filename is never used to name anything. Temp files, when a
+  caller asks for one, get random names, `0600` permissions, and are
+  overwritten before being unlinked; orphans are swept at startup.
+
+**Logging**
+
+- Recognised text, client filenames and API keys never reach the log stream.
+  The formatter redacts a list of sensitive keys, summarises raw bytes, and
+  scrubs long machine-readable runs out of messages.
+- `LOG_SENSITIVE_DATA` can lift this for local debugging and warns loudly at
+  startup when enabled. Keep it `false` in production.
+
+**Responses and transport**
+
+- Unhandled exceptions are logged with their traceback and answered with a
+  generic `PROCESSING_ERROR`. No stack traces leave the process.
+- `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`.
+- CORS is off by default. Set `ALLOWED_ORIGINS` only if a browser calls the API
+  directly.
+- The systemd unit runs as a dedicated non-root user with `NoNewPrivileges`,
+  `ProtectSystem=strict` and a syscall filter. The application binds loopback
+  only; Nginx is the public entry point.
+
+Set `TRUST_PROXY_HEADERS=true` **only** when actually behind a reverse proxy —
+otherwise `X-Forwarded-For` becomes a way to walk around the rate limiter.
 
 ---
 
 ## Testing
 
 ```bash
-./scripts/test.sh                      # everything
+./scripts/test.sh                      # default suite (stub provider)
+./scripts/test.sh -m "not integration" # explicitly skip the real-engine tests
+./scripts/test.sh tests/mrz -v         # one area
 ./scripts/test.sh --cov=app            # with coverage
-./scripts/test.sh tests/test_layout.py -v
 ```
 
-The default suite runs against the scripted **stub provider**, so it needs no
-OCR models and no network. Images are drawn with OpenCV at test time. There are
-no sample documents in the repository and no real data of any kind.
+**470 tests** in total:
 
-`tests/integration/` is different: it drives the **real PaddleOCR engine**
-end to end - English, Arabic, digits, dates, mixed Arabic/English, rotated
-pages, bounding boxes, confidence and reading order, plus the HTTP endpoint.
-Those tests are skipped automatically when the engine is not installed, and are
-still built entirely from generated images:
-
-```bash
-./scripts/test.sh tests/integration          # real engine (slow, ~4 min)
-./scripts/test.sh -m "not integration"       # skip them
-```
-
-Arabic pages are rendered with `arabic-reshaper` + `python-bidi` so the glyphs
-are joined and reordered the way a real page prints them; without that the
-engine is being asked to read something no document looks like.
-
-Covered: the endpoint contract, API key authentication, rate limiting, upload
-validation (size, type, signature, pixel ceiling), image preprocessing
-(downscale, rotate, deskew convergence, perspective, enhance), layout analysis
-(line grouping, reading order, RTL, regions, deduplication, confidence),
-the provider abstraction and both PaddleOCR output shapes, engine lifecycle
-(load-once, concurrency ceiling, timeout, per-language failure isolation),
-error handling and the no-leak guarantee, log redaction, and temp-file cleanup.
-
-To try real images, drop them in `tests/fixtures/local/` — that path is
-git-ignored — and point the smoke script at one:
-
-```bash
-./scripts/smoke.sh http://127.0.0.1:8000 tests/fixtures/local/my-page.jpg
-```
-
----
-
-## Performance and concurrency
-
-OCR is CPU-bound and memory-hungry. The defaults are tuned for correctness
-under load rather than for a single fast request.
-
-The figures below were observed on a development machine (Apple M-series,
-10 cores, `OCR_CPU_THREADS=1`, a 1200x410 page) and are indicative only.
-**Inference performance is environment-dependent: measure it on your own
-server before sizing anything.** Step 4 of the deployment guide walks through
-validating the engine on the target host.
-
-| Configuration | Time per page | Steady RSS |
+| Suite | Tests | Needs OCR models? |
 |---|---|---|
-| English, default models | ~3.1 s | 1454 MB |
-| English, **mobile models** | ~1.0 s | 922 MB |
-| Arabic, mobile models | ~0.77 s | — |
-| English + Arabic, mobile models, both loaded | — | 791 MB |
-| English + Arabic, default models, both passes | ~9.6-12.4 s | 2822 MB |
+| Core OCR infrastructure | 171 | no |
+| MRZ parser | 259 | no |
+| Integration (real PaddleOCR engine) | 40 | yes |
 
-Two things follow from that table:
+The default run is **430 passed, 40 deselected** — the integration tests are
+skipped automatically when the engine is not installed, so the suite passes on
+a bare checkout with no models and no network.
 
-* **The mobile models are worth it.** Roughly 3x faster and a third less
-  memory, for 0.994 vs 0.998 mean confidence on clean synthetic text. Set
-  `OCR_DET_MODEL_NAME` / `OCR_REC_MODEL_NAME` (see below).
-* **Each configured language is a separate full pass over the image.** Running
-  `en,arabic` costs about the sum of both, so list only what you need and let
-  callers narrow it further with `?languages=`.
+Everything is synthetic. Images are drawn with OpenCV at test time; MRZ zones
+are generated by `app/services/mrz/synthetic.py` from invented field values.
+There are no sample documents and no real personal data anywhere in this
+repository.
 
-`OCR_CPU_THREADS` past 1 made little difference here (2.8 s vs 3.1 s): the
-model, not thread count, is the bottleneck. Keep it at 1 when requests overlap.
+What is covered: the endpoint contract, API key authentication, rate limiting,
+upload validation (size, signature, pixel ceiling), preprocessing (downscale,
+rotate, deskew convergence, perspective, enhance), layout analysis (line
+grouping, reading order, RTL, regions, deduplication), the provider abstraction
+and both PaddleOCR output shapes, engine lifecycle (load-once, concurrency
+ceiling, timeout, per-language failure isolation), error handling and the
+no-leak guarantee, log redaction, temp-file cleanup, provider isolation, and
+the MRZ parser end to end.
 
-**Recognition models are script-specific.** A bare
-`OCR_REC_MODEL_NAME=PP-OCRv5_mobile_rec` is a Latin model and would be applied
-to every language, making Arabic pages come back as transliterated nonsense at
-~0.58 confidence. With more than one language, use the per-language form:
+The integration suite drives the real engine over English, Arabic, digits,
+dates, mixed Arabic/English, rotated pages, geometry, confidence and reading
+order, plus the HTTP endpoint. Arabic pages are rendered with `arabic-reshaper`
+and `python-bidi` so the glyphs are joined and reordered the way a real page
+prints them.
+
+Linting:
 
 ```bash
-OCR_DET_MODEL_NAME=PP-OCRv5_mobile_det
-OCR_REC_MODEL_NAME=en:PP-OCRv5_mobile_rec,arabic:arabic_PP-OCRv5_mobile_rec
+.venv/bin/ruff check app tests
 ```
 
-**Memory.** Roughly 400-700 MB per loaded language model, plus the working set
-for the image. RSS plateaus after the first few requests - it does not grow
-unbounded.
+---
 
-**The important arithmetic:** every uvicorn worker loads its *own* copy of every
-model. Four workers with two languages is eight models in RAM. More workers is
-not automatically better.
+## Project structure
 
-| Machine | Recommended |
-|---|---|
-| 2 vCPU / 4 GB | `WORKERS=1`, `OCR_MAX_CONCURRENCY=1` |
-| 4 vCPU / 8 GB | `WORKERS=2`, `OCR_MAX_CONCURRENCY=1` |
-| 8 vCPU / 16 GB | `WORKERS=3`, `OCR_MAX_CONCURRENCY=2` |
+```
+app/
+  main.py                        application factory, lifespan, middleware
+  api/
+    deps.py                      API key auth, rate limit dependency
+    errors.py                    exception handlers, error envelope
+    middleware.py                request id, body size guard, security headers
+    v1/
+      ocr.py                     POST /api/v1/ocr
+      system.py                  GET /health, GET /ready
+      version.py                 GET /api/v1/version
+  core/
+    config.py                    environment-driven settings
+    exceptions.py                error codes and exception hierarchy
+    logging.py                   structured JSON logging with redaction
+    ratelimit.py                 in-memory and Redis limiters
+    security.py                  constant-time key comparison
+  schemas/                       Pydantic request/response models
+  services/
+    pipeline.py                  validate -> preprocess -> recognise -> layout
+    layout.py                    lines, reading order, regions, deduplication
+    image_processing/            validation, decoding, OpenCV preprocessing
+    ocr/
+      base.py                    OCRProvider, TextBlock, OCRResult
+      paddle.py                  PaddleOCRProvider
+      stub.py                    scripted provider for development and tests
+      registry.py                name -> provider
+      engine.py                  load-once engine, thread pool, timeouts
+    mrz/                         standalone ICAO 9303 parser (see below)
+  utils/                         text, date and secure file helpers
+deploy/                          systemd unit and Nginx configuration
+scripts/                         setup, run, test, smoke
+tests/                           pytest suite, synthetic fixtures only
+```
 
-Rules of thumb:
+The MRZ package, bottom up:
 
-* Start with `WORKERS=1` and raise it only while you have RAM headroom to spare.
-* Keep `OCR_MAX_CONCURRENCY=1` unless you have measured otherwise. Parallel
-  inferences inside one process contend for the same cores and usually make
-  *both* requests slower while doubling peak memory.
-* `run.sh` pins `OMP_NUM_THREADS=1`. Without it the math libraries spawn one
-  thread per core inside every worker and the workers fight each other.
-* Drop `OCR_LANGUAGES` to just the languages you need. Each one is a separate
-  model load and a separate inference pass per request.
-* `OCR_DET_LIMIT_SIDE_LEN` and `IMAGE_MAX_DIMENSION` trade accuracy for speed.
-  Lowering them to `1280` roughly halves inference time on large scans.
-* Use `REDIS_URL` once you run more than one worker, otherwise each worker
-  enforces the rate limit independently.
+```
+app/services/mrz/
+  charset.py     the zone alphabet and conservative glyph normalisation
+  checkdigit.py  the 7-3-1 check digit computation
+  corrector.py   type coercion and check-digit-guided repair
+  parser.py      ICAO field layouts for TD1, TD2, TD3 and MRV
+  textscan.py    finding zone lines inside plain text
+  icao.py        the public parser, producing structured per-field results
+  document.py    MRZDocument
+  fields.py      ParsedField
+  confidence.py  confidence scoring
+  synthetic.py   synthetic zone generation for fixtures
+  detector.py    optional bridge from positioned OCR boxes
+```
 
-Expect roughly 0.5-2 s per page per language on a modern CPU at default
-settings. Set your client timeout accordingly — well above `OCR_TIMEOUT_SECONDS`.
+`detector.py` is the only module there that imports anything from the OCR
+layer, and nothing else in the package depends on it.
 
 ---
+
+## Extending the OCR engine
+
+Implement `OCRProvider` and register it. The API, pipeline, schemas and tests
+are unchanged.
+
+```python
+from app.services.ocr.base import OCRProvider, OCRResult, TextBlock
+from app.services.ocr.registry import register_provider
+
+
+class MyEngineProvider(OCRProvider):
+    name = "myengine"
+
+    def supported_languages(self):
+        return ["en"]
+
+    def warmup(self, languages=None):
+        # Called once at application startup. Must be idempotent.
+        self._model = load_my_model()
+
+    def is_ready(self) -> bool:
+        return getattr(self, "_model", None) is not None
+
+    def recognize(self, image, lang="en") -> OCRResult:
+        # `image` is a BGR numpy array.
+        blocks = [
+            TextBlock(
+                text=item.text,
+                confidence=item.score,   # 0.0 - 1.0
+                polygon=item.quad,       # [(x, y), (x, y), (x, y), (x, y)]
+                lang=lang,
+            )
+            for item in self._model.run(image)
+        ]
+        return OCRResult(blocks=blocks, lang=lang, provider=self.name)
+
+
+register_provider("myengine", MyEngineProvider)
+```
+
+Then set `OCR_PROVIDER=myengine`.
+
+The interface is four abstract methods — `supported_languages`, `warmup`,
+`recognize`, `is_ready` — plus optional `info()` and `close()`.
+`tests/test_ocr_provider.py::test_a_new_provider_can_be_registered` exercises
+exactly this path.
+
+The PaddleOCR adapter introspects the installed version's constructor to decide
+which argument dialect to speak, so it works across the 2.x and 3.x APIs.
 
 ---
 
@@ -993,6 +1606,8 @@ enforces in `tests/test_provider_isolation.py`.
 - [ ] Restart and rollback procedures rehearsed once
 - [ ] An end-to-end `POST /api/v1/ocr` returns correct text for a test image
 
+---
+
 ## Troubleshooting
 
 **`OCR_FAILED: PaddleOCR is not installed`**
@@ -1002,7 +1617,7 @@ on the API without them, set `OCR_PROVIDER=stub`.
 **Startup hangs on the first run**
 PaddleOCR is downloading models. It needs network access once; afterwards it is
 offline. Watch with `LOG_LEVEL=DEBUG`, or pre-download (see
-[First run](#first-run-and-model-download)).
+[Quick start](#2-real-ocr-with-paddleocr)).
 
 **`paddlepaddle` will not install**
 Wheel availability varies by platform and Python version — Apple Silicon in
@@ -1033,79 +1648,136 @@ Your client's timeout must exceed `OCR_TIMEOUT_SECONDS` (default 45).
 
 ---
 
-## Project layout
+---
 
-```
-app/
-  main.py                        application factory, lifespan, middleware wiring
-  api/
-    deps.py                      API key auth, rate limit dependency
-    errors.py                    exception handlers, error envelope
-    middleware.py                request id, body size guard, security headers
-    v1/
-      ocr.py                     POST /api/v1/ocr
-      system.py                  GET /health, GET /ready
-      version.py                 GET /api/v1/version
-      router.py
-  core/
-    config.py                    environment-driven settings
-    exceptions.py                error codes and the exception hierarchy
-    logging.py                   structured JSON logging with PII redaction
-    ratelimit.py                 in-memory and Redis limiters
-    security.py                  constant-time key comparison
-  schemas/                       Pydantic request/response models
-  services/
-    pipeline.py                  the orchestration described above
-    layout.py                    lines, reading order, regions, deduplication
-    image_processing/
-      loader.py                  validation and decoding
-      preprocess.py              perspective, downscale, deskew, enhance
-    ocr/
-      base.py                    OCRProvider, TextBlock, OCRResult
-      paddle.py                  PaddleOCRProvider
-      stub.py                    scripted provider for tests
-      registry.py                name -> provider
-      engine.py                  load-once engine, thread pool, timeouts
-  utils/                         text, date and secure file helpers
-tests/                           pytest suite, synthetic fixtures only
-scripts/                         setup, run, test, smoke
+## Roadmap
+
+Ideas, not commitments. Nothing here is implemented today.
+
+- [ ] Expose the MRZ parser through the public API (a passport endpoint, or an
+      opt-in `mrz` block on the OCR response)
+- [ ] Additional OCR providers behind the existing `OCRProvider` interface
+- [ ] Multi-page / PDF input
+- [ ] Optional Docker image (the project deliberately does not require Docker
+      today)
+- [ ] GPU deployment documentation (`OCR_USE_GPU` exists but is untested here)
+- [ ] Async job API for long-running batches
+
+Already implemented, so **not** roadmap items: the provider abstraction, the
+stub provider, Arabic support, MRZ parsing as a library, rate limiting, Redis
+support, and the non-Docker VPS deployment path.
+
+---
+
+## Contributing
+
+Contributions are welcome.
+
+```bash
+git clone <your-fork-url> ocr && cd ocr
+DEV=1 ./scripts/setup.sh
+git checkout -b my-change
+
+./scripts/test.sh                    # must stay green
+.venv/bin/ruff check app tests       # must be clean
+
+git commit -m "Describe the change"
 ```
 
-### Standalone library: machine-readable text parser
+Then open a pull request describing what changed and why.
 
-`app/services/mrz/` is an independent, standards-based parser for ICAO Doc 9303
-machine-readable zones (TD1, TD2, TD3 and MRV). It takes **already-recognised
-text lines** and returns a structured, per-field result:
+Guidelines that matter in this project:
 
-```python
-from app.services.mrz import create_parser
+- **Tests are required** for behaviour changes, and they must run without OCR
+  models — use the stub provider or the MRZ synthetic generator.
+- **Fixtures must be synthetic.** Never add a real document, a real photo, or
+  real personal data to the repository. Images are generated with OpenCV at
+  test time; MRZ zones come from `build_mrz(...)`. Put local test images in
+  `tests/fixtures/local/`, which is git-ignored.
+- **Do not log document content.** The redaction tests exist to keep it that
+  way; if you add logging, add a test that proves it stays clean.
+- **Do not weaken the "never invent a value" rule.** Unreadable input must
+  produce `None` plus a recorded reason, not a plausible guess.
+- Keep `ruff` clean; the configuration is in `pyproject.toml`.
 
-parser = create_parser("icao9303")
-document = parser.parse_lines([line_one, line_two], ocr_confidence=0.94)
+If you are adding an OCR engine, see
+[Extending the OCR engine](#extending-the-ocr-engine) — that path is designed
+to be additive and should not require touching the API.
 
-if document is not None:
-    field = document.get("document_number")
-    field.value        # the value read, or None if it could not be read
-    field.valid        # True/False from the check digit, None if unprotected
-    field.confidence   # how much the standard's redundancy supports it
-    field.errors       # what went wrong, if anything
-```
+---
 
-It is **not wired into the API**. It imports nothing from FastAPI, the OCR
-engines, the image pipeline, or even numpy/OpenCV - a property the test-suite
-enforces in a subprocess. `app/services/mrz/detector.py` is the optional bridge
-that finds a zone in positioned OCR boxes; it is the only module there that
-touches the OCR layer, and nothing else depends on it.
+## License
 
-See [`app/services/mrz/__init__.py`](app/services/mrz/__init__.py) for the layer
-map, and `tests/mrz/` for 259 tests built entirely on synthetic fixtures.
+Released under the [MIT License](LICENSE).
 
-### Not wired into the API
+You may use, modify, distribute and sell this software, including commercially,
+provided the copyright notice and permission notice are retained. The software
+is provided "as is", without warranty of any kind.
 
-These modules are used only by the parser library above, not by any endpoint:
+The runtime dependencies carry their own licenses — PaddleOCR and PaddlePaddle
+are Apache-2.0, OpenCV is Apache-2.0, FastAPI is MIT — and those terms apply to
+your deployment independently of this project's license.
 
-* `app/utils/text.py` - Arabic/Latin text normalisation and string similarity.
-* `app/utils/dates.py` - date parsing and plausibility checks (the parser uses
-  it for century resolution).
+---
 
-`app/utils/files.py` **is** used by the API (secure temp-file handling).
+## FAQ
+
+**Is Docker required?**
+No. The project deploys with a virtualenv, Uvicorn, systemd and Nginx. There is
+no Dockerfile in the repository.
+
+**Can I call it from Laravel?**
+Yes — that is a primary use case. See
+[Laravel / PHP integration](#laravel--php-integration). Note that request
+options such as `languages` are query-string parameters, not form fields.
+
+**Does it support Arabic?**
+Yes, including mixed Arabic/English pages, with right-to-left reading order.
+Set `OCR_LANGUAGES=en,arabic` or pass `?languages=arabic` per request.
+
+**Does it read passports?**
+It contains a complete ICAO 9303 MRZ parser (TD1, TD2, TD3, MRV) with check-digit
+validation — but that parser is **not** wired into `POST /api/v1/ocr`. The
+endpoint returns generic OCR output only. Use the parser as a library today;
+API integration is on the roadmap.
+
+**Does it require a paid API?**
+No. PaddleOCR and OpenCV are open source and run locally. After the models are
+cached, no outbound network calls are required.
+
+**Can I run it on a VPS?**
+Yes. There is a full Ubuntu 22.04/24.04 guide with a systemd unit and Nginx
+configuration in this README.
+
+**Does it save uploaded images?**
+No, not by default. Uploads are decoded into memory and discarded. Set
+`STORE_UPLOADS=true` only if you deliberately want retention — and give it a
+retention policy.
+
+**Is my document text written to the logs?**
+No. Recognised text, client filenames and API keys are redacted from the log
+stream. `LOG_SENSITIVE_DATA=true` lifts this for local debugging only, and
+warns at startup.
+
+**Can I use only the MRZ parser?**
+Yes. `app/services/mrz/` imports nothing from FastAPI, the OCR engines or the
+image pipeline — not even OpenCV or NumPy — and a test enforces that. Copy the
+package or import it directly.
+
+**Can I replace PaddleOCR?**
+Yes. Implement `OCRProvider`, register it, set `OCR_PROVIDER`. See
+[Extending the OCR engine](#extending-the-ocr-engine).
+
+**Can I run it without downloading any model?**
+Yes. `OCR_PROVIDER=stub` runs the whole service and test-suite without loading
+a model, and never imports PaddleOCR. The stub returns only text scripted into
+it, so use it for infrastructure and integration work — not to read real
+images.
+
+**Which Python version?**
+`pyproject.toml` declares `>=3.9`. 3.11+ is recommended and is what the
+deployment guide targets.
+
+**Does it work on GPU?**
+`OCR_USE_GPU` exists, but GPU execution is not tested or documented by this
+project. Treat it as unverified.
