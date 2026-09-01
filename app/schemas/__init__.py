@@ -13,6 +13,8 @@ from app.schemas.common import (
 from app.schemas.ocr import (
     ConfidenceSummary,
     ImageInfo,
+    MRZFieldModel,
+    MRZModel,
     OCRResponse,
     PreprocessingInfo,
     TextBlockModel,
@@ -28,6 +30,8 @@ __all__ = [
     "ErrorResponse",
     "HealthResponse",
     "ImageInfo",
+    "MRZFieldModel",
+    "MRZModel",
     "OCRResponse",
     "PreprocessingInfo",
     "ReadinessResponse",

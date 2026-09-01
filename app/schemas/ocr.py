@@ -66,6 +66,59 @@ class PreprocessingInfo(BaseModel):
     perspective_corrected: bool = False
 
 
+
+class MRZFieldModel(BaseModel):
+    """One field read from a machine-readable zone.
+
+    Null members are omitted from the response, so read their absence as
+    meaning rather than as missing data:
+
+    * no ``value`` - the field could not be read. It is never guessed.
+    * no ``valid`` - the standard defines no check digit for this field, so its
+      correctness is unknown. That is **not** the same as ``false``, which
+      means a check digit actively contradicted what was read.
+    """
+
+    value: Optional[str] = Field(
+        default=None, description="Absent when the field could not be read"
+    )
+    valid: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Verdict of this field's own check digit. Absent when the standard "
+            "defines no check digit for the field."
+        ),
+    )
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    errors: List[str] = Field(default_factory=list)
+    corrected: bool = False
+
+
+class MRZModel(BaseModel):
+    """A parsed machine-readable zone (ICAO 9303 TD1/TD2/TD3/MRV)."""
+
+    type: str = Field(..., description="TD1, TD2, TD3, MRV_A or MRV_B")
+    valid: bool = Field(
+        ..., description="Structurally sound and every applicable check digit agrees"
+    )
+    structure_valid: bool
+    check_digits_valid: bool
+    check_digits: Dict[str, Optional[bool]] = Field(default_factory=dict)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    fields: Dict[str, MRZFieldModel] = Field(default_factory=dict)
+    full_name: Optional[str] = None
+    errors: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    corrections: List[str] = Field(default_factory=list)
+    raw: Optional[str] = Field(
+        default=None,
+        description=(
+            "The zone exactly as read. Reproduces every field in one string, so "
+            "it is only returned when include_mrz_raw=true."
+        ),
+    )
+
+
 class OCRResponse(BaseModel):
     """Successful result of ``POST /api/v1/ocr``."""
 
@@ -90,6 +143,14 @@ class OCRResponse(BaseModel):
     timings_ms: Dict[str, float] = Field(default_factory=dict)
     processing_time_ms: float
     warnings: List[str] = Field(default_factory=list)
+    mrz: Optional[MRZModel] = Field(
+        default=None,
+        description=(
+            "Parsed machine-readable zone, when one was found and requested. "
+            "Absent otherwise - its absence means no zone was detected, not "
+            "that the document lacks one."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -137,7 +198,39 @@ def _bbox(data: Dict[str, Any]) -> BoundingBox:
     return BoundingBox(**data)
 
 
-def build_response(result: Any, request_id: Optional[str], elapsed_ms: float) -> OCRResponse:
+def build_mrz(document: Any, include_raw: bool = False) -> Optional[MRZModel]:
+    """Map a parsed MRZ document onto the wire model.
+
+    Returns ``None`` when nothing was parsed, which is how the response says
+    "no zone found" without inventing a shape for it.
+    """
+    if document is None:
+        return None
+    data = document.to_dict(include_raw=include_raw)
+    return MRZModel(
+        type=data["mrz_type"],
+        valid=data["valid"],
+        structure_valid=data["structure_valid"],
+        check_digits_valid=data["check_digits_valid"],
+        check_digits=data["check_digits"],
+        confidence=data["confidence"],
+        fields={
+            name: MRZFieldModel(**field) for name, field in data["fields"].items()
+        },
+        full_name=document.full_name,
+        errors=data.get("errors", []),
+        warnings=data.get("warnings", []),
+        corrections=data.get("corrections", []),
+        raw=data.get("raw"),
+    )
+
+
+def build_response(
+    result: Any,
+    request_id: Optional[str],
+    elapsed_ms: float,
+    include_mrz_raw: bool = False,
+) -> OCRResponse:
     """Map a :class:`~app.services.pipeline.PipelineResult` onto the wire format."""
     lines = [
         TextLineModel(**{**data, "bbox": _bbox(data["bbox"])})
@@ -183,4 +276,5 @@ def build_response(result: Any, request_id: Optional[str], elapsed_ms: float) ->
         timings_ms=result.timings,
         processing_time_ms=round(elapsed_ms, 1),
         warnings=result.warnings,
+        mrz=build_mrz(getattr(result, "mrz", None), include_raw=include_mrz_raw),
     )

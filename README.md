@@ -116,10 +116,11 @@ A standards-based parser for ICAO Doc 9303 machine-readable zones.
 | Correction | Conservative, standards-driven OCR repair (see below) |
 | Extended numbers | Document numbers longer than 9 characters recovered from the optional-data field |
 
-> **The MRZ parser is standalone. It is *not* wired into
-> `POST /api/v1/ocr`.** That endpoint returns generic OCR output only — no
-> passport fields. To parse an MRZ today, call the library yourself with text
-> lines you already have. See [Passport / MRZ parser](#passport--mrz-parser).
+> **The MRZ parser is available two ways.** As a standalone library that takes
+> text lines you already have, and — since it was wired in — as an optional
+> `mrz` block on `POST /api/v1/ocr`. The block is opt-in per request, additive
+> (nothing else in the response changed), and absent when no zone is found.
+> See [Passport / MRZ parser](#passport--mrz-parser).
 
 Correction is deliberately conservative: type coercion is applied only where
 the standard fixes a field's type, and check-digit-guided repair is accepted
@@ -319,6 +320,8 @@ form fields; sending them in the multipart body has no effect.
 | `include_blocks` | bool | `true` | Include every raw recognition box. |
 | `include_regions` | bool | `false` | Include paragraph-like line groupings. |
 | `min_confidence` | float | `0.0` | Drop boxes below this confidence (0.0–1.0). |
+| `mrz` | bool | `ENABLE_MRZ` | Parse a machine-readable zone if the document has one. |
+| `include_mrz_raw` | bool | `false` | Include the zone exactly as read. Opt-in: it reproduces every field in one string. |
 
 **Response `200`** — this is a real response body from the service:
 
@@ -720,9 +723,61 @@ MRZ parser:  text lines ->  validated, structured travel-document data
 The MRZ parser takes **text lines you already have** and returns structured
 fields with per-field validity and confidence. It does not read images.
 
-**It is not connected to `POST /api/v1/ocr`.** That endpoint returns generic
-OCR output only. To use the parser today, call it as a library — optionally
-feeding it lines that came from this service's own OCR output.
+It is also reachable through the API: pass `?mrz=true` to `POST /api/v1/ocr`
+and the response gains an `mrz` block. See
+[MRZ through the API](#mrz-through-the-api). The library remains usable on its
+own — the API is a caller, not the only entry point.
+
+### MRZ through the API
+
+Pass `?mrz=true` and the response gains an `mrz` block:
+
+```bash
+curl -X POST "https://ocr.example.com/api/v1/ocr?mrz=true&include_blocks=false" \
+  -H "X-API-Key: $OCR_API_KEY" \
+  -F "image=@passport-page.jpg"
+```
+
+```json
+{
+  "success": true,
+  "text": "...",
+  "mrz": {
+    "type": "TD3",
+    "valid": true,
+    "structure_valid": true,
+    "check_digits_valid": true,
+    "check_digits": { "document_number": true, "birth_date": true, "composite": true },
+    "confidence": 0.99,
+    "full_name": "ANNA MARIA ERIKSSON",
+    "fields": {
+      "document_number": { "value": "L898902C3", "valid": true, "confidence": 0.97, "errors": [], "corrected": false },
+      "birth_date": { "value": "1974-08-12", "valid": true, "confidence": 0.97, "errors": [], "corrected": false },
+      "issuing_state": { "value": "UTO", "confidence": 0.84, "errors": [], "corrected": false }
+    },
+    "errors": [],
+    "warnings": [],
+    "corrections": []
+  }
+}
+```
+
+Reading the block:
+
+- **The `mrz` key is absent when no zone was found.** That is not an error — a
+  page without a zone is a normal result, and the rest of the response is
+  unaffected.
+- **A field with no `value` could not be read.** It is never guessed.
+- **A field with no `valid` has no check digit in the standard**, so its
+  correctness is unknown. That is different from `"valid": false`, which means
+  a check digit actively contradicted what was read.
+- **`raw` is withheld unless you pass `include_mrz_raw=true`**, because it
+  reproduces every field in a single string.
+- Parsing is text-only, so it costs a few milliseconds next to recognition.
+  The `timings_ms.mrz_ms` entry reports it.
+
+The zone contents never reach the logs; only whether a zone was found and
+whether it validated.
 
 ### Independence
 
@@ -1785,8 +1840,6 @@ Your client's timeout must exceed `OCR_TIMEOUT_SECONDS` (default 45).
 
 Ideas, not commitments. Nothing here is implemented today.
 
-- [ ] Expose the MRZ parser through the public API (a passport endpoint, or an
-      opt-in `mrz` block on the OCR response)
 - [ ] Additional OCR providers behind the existing `OCRProvider` interface
 - [ ] Multi-page / PDF input
 - [ ] Optional Docker image (the project deliberately does not require Docker
@@ -1795,8 +1848,9 @@ Ideas, not commitments. Nothing here is implemented today.
 - [ ] Async job API for long-running batches
 
 Already implemented, so **not** roadmap items: the provider abstraction, the
-stub provider, Arabic support, MRZ parsing as a library, rate limiting, Redis
-support, and the non-Docker VPS deployment path.
+stub provider, Arabic support, MRZ parsing both as a library and as an opt-in
+`mrz` block on the OCR endpoint, rate limiting, Redis support, and the
+non-Docker VPS deployment path.
 
 ---
 
@@ -1867,10 +1921,12 @@ Yes, including mixed Arabic/English pages, with right-to-left reading order.
 Set `OCR_LANGUAGES=en,arabic` or pass `?languages=arabic` per request.
 
 **Does it read passports?**
-It contains a complete ICAO 9303 MRZ parser (TD1, TD2, TD3, MRV) with check-digit
-validation — but that parser is **not** wired into `POST /api/v1/ocr`. The
-endpoint returns generic OCR output only. Use the parser as a library today;
-API integration is on the roadmap.
+It contains a complete ICAO 9303 MRZ parser (TD1, TD2, TD3, MRV) with
+check-digit validation. Pass `?mrz=true` to `POST /api/v1/ocr` and the response
+gains an `mrz` block with the parsed fields; the parser is also usable as a
+standalone library. Note that it reads the *machine-readable zone* — the two
+lines at the bottom — which is far more reliable than the printed text because
+its check digits catch misreads.
 
 **Does it require a paid API?**
 No. PaddleOCR and OpenCV are open source and run locally. After the models are
@@ -1893,7 +1949,8 @@ warns at startup.
 **Can I use only the MRZ parser?**
 Yes. `app/services/mrz/` imports nothing from FastAPI, the OCR engines or the
 image pipeline — not even OpenCV or NumPy — and a test enforces that. Copy the
-package or import it directly.
+package or import it directly. Wiring it into the API did not change that: the
+pipeline calls the library, never the other way round.
 
 **Can I replace PaddleOCR?**
 Yes. Implement `OCRProvider`, register it, set `OCR_PROVIDER`. See
