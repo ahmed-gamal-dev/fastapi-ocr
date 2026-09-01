@@ -35,6 +35,24 @@ Environment=PYTHONUNBUFFERED=1
 # owned by the service user.
 Environment=PADDLE_PDX_CACHE_HOME=/opt/passport-ocr/models
 
+# Run inference through Paddle's own kernels instead of oneDNN.
+#
+# On CPU, PaddleX defaults to run_mode="mkldnn" (see pp_option.py). With
+# paddlepaddle 3.3.1 that path can fail outright on x86:
+#
+#   NotImplementedError: (Unimplemented) ConvertPirAttribute2RuntimeAttribute
+#   not support [pir::ArrayAttribute<pir::DoubleAttribute>]
+#   (at .../new_executor/instruction/onednn/onednn_instruction.cc:116)
+#
+# Every recognition request fails, so the service loads and reports itself
+# healthy while reading nothing. Paddle's own FLAGS_use_mkldnn=0 does not help:
+# PaddleX selects the run mode itself and that flag never reaches the decision.
+#
+# oneDNN does accelerate inference on Intel CPUs, so if your host runs it
+# without error you can drop this line and measure the difference. Correctness
+# first: a slower engine beats one that cannot read.
+Environment=PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=False
+
 # Bind to loopback only. Nginx is the public entry point.
 ExecStart=/opt/passport-ocr/.venv/bin/uvicorn app.main:app \
     --host 127.0.0.1 \

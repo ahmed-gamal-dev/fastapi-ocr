@@ -1736,6 +1736,26 @@ particular is patchy. Check <https://www.paddlepaddle.org.cn/en> for the wheel
 matching your platform. `OCR_PROVIDER=stub` keeps the rest of the service usable
 meanwhile.
 
+**OCR returns empty text and the logs show `ConvertPirAttribute2RuntimeAttribute`**
+PaddleX defaults to oneDNN (`run_mode="mkldnn"`) on CPU, and with
+paddlepaddle 3.3.1 that path can fail on x86 inside
+`onednn_instruction.cc`. Every request then fails while the service still
+reports itself healthy. Set `PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=False` -
+`deploy/passport-ocr.service` already does. Paddle's own `FLAGS_use_mkldnn=0`
+does **not** help: PaddleX picks the run mode itself, before that flag is
+consulted. Verify with:
+
+```bash
+sudo -u ocr env PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=False \
+  /opt/passport-ocr/.venv/bin/python -c "
+import cv2, numpy as np
+from app.services.ocr.registry import create_provider
+img = np.full((400, 1100, 3), 245, np.uint8)
+cv2.putText(img, 'CHECK 12345', (40, 220), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (20,20,20), 3)
+p = create_provider('paddle'); p.warmup(['en'])
+print([b.text for b in p.recognize(img, 'en').blocks])"
+```
+
 **`/ready` returns 503**
 Models are still loading, or a load failed. Check the logs for
 `ocr_warmup_failed`. `/health` stays `200` throughout by design.
