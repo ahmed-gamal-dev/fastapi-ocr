@@ -10,6 +10,13 @@ from __future__ import annotations
 import os
 
 # Configure the service before anything imports the settings singleton.
+#
+# Settings also reads a .env file from the working directory, and environment
+# variables take precedence over it. That precedence is what makes this block
+# work: without it, running the suite in a directory that holds a *deployed*
+# .env would test that deployment's configuration instead of a known one.
+# `scripts/deploy.sh` runs these tests on the server, next to the production
+# .env, so the suite has to be hermetic or the deploy gate is meaningless.
 os.environ.setdefault("OCR_PROVIDER", "stub")
 os.environ.setdefault("OCR_LANGUAGES", "en")
 os.environ.setdefault("OCR_API_KEY", "test-key-primary,test-key-secondary")
@@ -18,6 +25,21 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("LOG_FORMAT", "console")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("ENVIRONMENT", "test")
+
+# Forced, not defaulted: these decide whether a request is served at all, so a
+# deployment value for any of them would fail the suite for reasons that have
+# nothing to do with the code under test.
+#
+# ALLOWED_HOSTS is the one that bites: a real deployment sets it to its own
+# domain, TrustedHostMiddleware then rejects TestClient's "testserver" host,
+# and every single HTTP test fails with 400 "Invalid host header".
+os.environ["ALLOWED_HOSTS"] = "*"
+os.environ["ALLOWED_ORIGINS"] = ""
+os.environ["TRUST_PROXY_HEADERS"] = "false"
+os.environ["DOCS_ENABLED"] = "true"
+os.environ["DEBUG"] = "false"
+# Never let a test run write uploads to a deployment's storage directory.
+os.environ["STORE_UPLOADS"] = "false"
 
 from collections.abc import Iterator, Sequence  # noqa: E402
 from typing import List
