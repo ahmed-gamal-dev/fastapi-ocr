@@ -53,14 +53,32 @@ def looks_like_mrz_line(text: str, min_ratio: float = 0.85) -> bool:
     return strict_mrz_ratio(text) >= min_ratio
 
 
+#: Visa formats. ICAO 9303 part 7 gives every visa a document code starting
+#: with V, and gives no other document that code.
+VISA_FORMATS = (MRV_A, MRV_B)
+
+
 def formats_for(lines: Sequence[str]) -> Iterable[str]:
-    """Formats whose shape is compatible with this grouping of lines."""
+    """Formats whose shape *and* document code are compatible with these lines.
+
+    Shape alone is not enough. A passport and an A-size visa are both 2 x 44,
+    and the visa defines three check digits where the passport defines five -
+    so ranking by the share of digits that agree quietly prefers the visa on a
+    damaged passport, because a format with fewer checks has fewer ways to
+    fail. The document code settles it: V is a visa and nothing else is.
+    """
     count = len(lines)
     width = max((len(line) for line in lines), default=0)
+    code = lines[0][:1].upper() if lines and lines[0] else ""
+    # Only decide when the first character was actually read as a letter.
+    is_visa = code == "V" if code.isalpha() else None
+
     out: List[str] = []
     for mrz_format in FORMAT_ORDER:
         rows, expected = FORMAT_SHAPES[mrz_format]
         if rows != count:
+            continue
+        if is_visa is not None and (mrz_format in VISA_FORMATS) != is_visa:
             continue
         # Allow OCR to have lost or gained a few characters at the edges.
         if abs(width - expected) <= WIDTH_TOLERANCE:
