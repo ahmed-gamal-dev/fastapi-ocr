@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.services.image_processing.preprocess import (
     binarize,
     correct_perspective,
+    crop_to_document,
     deskew,
     downscale,
     enhance,
@@ -114,6 +115,66 @@ def test_perspective_correction_straightens_a_photographed_page():
     assert applied is True
     # The background border is gone, so the result is smaller than the photo.
     assert corrected.shape[0] < canvas.shape[0]
+
+
+# ----------------------------------------------------------- cropping
+def _handheld(page_w: int = 560, page_h: int = 400) -> np.ndarray:
+    """A page small and crooked in a frame, the way a hand-held shot lands."""
+    page = make_image(page_w, page_h, ["ALPHA", "BETA", "GAMMA"])
+    canvas = np.full((900, 1400, 3), 90, np.uint8)
+    source = np.float32([[0, 0], [page_w, 0], [page_w, page_h], [0, page_h]])
+    target = np.float32([[430, 240], [980, 215], [1000, 640], [450, 660]])
+    warped = cv2.warpPerspective(
+        page, cv2.getPerspectiveTransform(source, target), (1400, 900)
+    )
+    return np.where(warped > 0, warped, canvas).astype(np.uint8)
+
+
+def test_cropping_finds_a_page_the_ordinary_pass_leaves_alone():
+    """The whole point of the opt-in pass.
+
+    A page filling a quarter of the frame is below the cautious threshold the
+    default uses, so the ordinary chain declines to crop it.
+    """
+    photo = _handheld()
+
+    _, ordinary = correct_perspective(photo)
+    _, cropped = crop_to_document(photo)
+
+    assert ordinary is False
+    assert cropped is True
+
+
+def test_cropping_spends_the_freed_pixels_on_the_page():
+    """Background out, resolution in - the text ends up larger than it was in
+    the original frame, which is what the recogniser needs."""
+    photo = _handheld()
+    result, applied = crop_to_document(photo)
+
+    assert applied is True
+    # Taller than the page occupied in the photo, despite the frame shrinking.
+    assert max(result.shape[:2]) > 550
+
+
+def test_cropping_leaves_a_scan_that_already_fills_the_frame():
+    image = make_image()
+    result, applied = crop_to_document(image)
+
+    assert applied is False
+    assert np.array_equal(result, image)
+
+
+def test_the_crop_step_is_named_in_the_result():
+    result = preprocess(_handheld(), crop=True)
+
+    assert "crop" in result.steps
+    assert result.perspective_corrected is True
+
+
+def test_cropping_is_off_unless_asked_for():
+    result = preprocess(_handheld())
+
+    assert "crop" not in result.steps
 
 
 def test_pipeline_reports_every_step_it_applied():

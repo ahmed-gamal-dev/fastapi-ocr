@@ -322,6 +322,7 @@ form fields; sending them in the multipart body has no effect.
 | `min_confidence` | float | `0.0` | Drop boxes below this confidence (0.0–1.0). |
 | `mrz` | bool | `ENABLE_MRZ` | Parse a machine-readable zone if the document has one. |
 | `include_mrz_raw` | bool | `false` | Include the zone exactly as read. Opt-in: it reproduces every field in one string. |
+| `crop` | bool | `false` | Cut the document out of the frame and enlarge it before recognition, for a page photographed small in the frame. Costs roughly twice the recognition time, so it is a retry rather than a default. No effect on an image the document already fills. |
 
 **Response `200`** — this is a real response body from the service:
 
