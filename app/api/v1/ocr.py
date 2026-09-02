@@ -109,6 +109,18 @@ async def ocr(
             "string, so it is opt-in."
         ),
     ),
+    crop: bool = Query(
+        default=False,
+        description=(
+            "Cut the document out of the frame and enlarge it before "
+            "recognition. For a page photographed in the hand, where the "
+            "printed text is small because the page is small in the frame. "
+            "Costs roughly twice the recognition time, so it is opt-in: send "
+            "the ordinary request first and retry with this when a field you "
+            "expected comes back empty. No effect on an image the document "
+            "already fills."
+        ),
+    ),
     _: str = Depends(enforce_rate_limit),
 ) -> OCRResponse:
     """Run OCR over one image and return the recognised text with geometry.
@@ -133,6 +145,7 @@ async def ocr(
             include_regions=include_regions,
             min_confidence=min_confidence,
             parse_mrz=mrz,
+            crop_to_document=crop,
         )
         result = await run_pipeline(data, image.filename, options)
         store_upload_if_enabled(data, result.image.detected_mime if result.image else None)

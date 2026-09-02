@@ -51,6 +51,7 @@ class PipelineOptions:
     include_regions: bool = False
     min_confidence: float = 0.0
     parse_mrz: bool = False
+    crop_to_document: bool = False
 
     @classmethod
     def build(
@@ -62,6 +63,7 @@ class PipelineOptions:
         include_regions: bool = False,
         min_confidence: float = 0.0,
         parse_mrz: Optional[bool] = None,
+        crop_to_document: bool = False,
     ) -> PipelineOptions:
         return cls(
             languages=list(languages) if languages else list(settings.OCR_LANGUAGES),
@@ -81,6 +83,7 @@ class PipelineOptions:
             include_regions=include_regions,
             min_confidence=max(0.0, min(1.0, min_confidence)),
             parse_mrz=(settings.ENABLE_MRZ if parse_mrz is None else parse_mrz),
+            crop_to_document=crop_to_document,
         )
 
 
@@ -146,7 +149,7 @@ async def run_pipeline(
     # ---------------------------------------------------------- preprocessing
     started = time.perf_counter()
     if options.preprocess_enabled:
-        prepared = preprocess(loaded.image)
+        prepared = preprocess(loaded.image, crop=options.crop_to_document)
     else:
         prepared = PreprocessResult(image=loaded.image, steps=[])
     timings["preprocess_ms"] = round((time.perf_counter() - started) * 1000, 1)

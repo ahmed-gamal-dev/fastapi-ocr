@@ -99,6 +99,17 @@ class Settings(BaseSettings):
     ENABLE_PERSPECTIVE_CORRECTION: bool = True
     ENABLE_ORIENTATION_CORRECTION: bool = True
     ENABLE_DESKEW: bool = True
+    # How much of the frame the document must fill before it is cropped out of
+    # it. The default is deliberately cautious: cropping the wrong contour
+    # loses content outright. The ?crop=true pass lowers it, because a caller
+    # asking for that has already seen the ordinary pass come back short.
+    PERSPECTIVE_MIN_AREA_RATIO: float = 0.35
+    CROP_MIN_AREA_RATIO: float = 0.12
+    # Longest side the cropped document is enlarged to. Small print in a
+    # hand-held photograph is only small relative to the background around it;
+    # once that is gone the pixels can be spent on the page itself.
+    CROP_TARGET_SIDE_LEN: int = 1600
+    CROP_MAX_UPSCALE: float = 3.0
 
     # ------------------------------------------------------------------- mrz
     # Machine readable zone detection/parsing (ICAO 9303 TD1/TD2/TD3, MRV).
