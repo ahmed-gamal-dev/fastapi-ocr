@@ -37,20 +37,21 @@ of the HTTP service.
 7. [Laravel / PHP integration](#laravel--php-integration)
 8. [Python integration](#python-integration)
 9. [Passport / MRZ parser](#passport--mrz-parser)
-10. [Deployment](#deployment)
-11. [CI / CD](#ci--cd)
-12. [Configuration](#configuration)
-13. [Performance and concurrency](#performance-and-concurrency)
-14. [Security and privacy](#security-and-privacy)
-15. [Testing](#testing)
-16. [Project structure](#project-structure)
-17. [Extending the OCR engine](#extending-the-ocr-engine)
-18. [Production deployment guide (detailed)](#production-deployment-ubuntu-2204--2404-no-docker)
-19. [Troubleshooting](#troubleshooting)
-20. [Roadmap](#roadmap)
-21. [Contributing](#contributing)
-22. [License](#license)
-23. [FAQ](#faq)
+10. [Printed fields the MRZ does not carry](#printed-fields-the-mrz-does-not-carry)
+11. [Deployment](#deployment)
+12. [CI / CD](#ci--cd)
+13. [Configuration](#configuration)
+14. [Performance and concurrency](#performance-and-concurrency)
+15. [Security and privacy](#security-and-privacy)
+16. [Testing](#testing)
+17. [Project structure](#project-structure)
+18. [Extending the OCR engine](#extending-the-ocr-engine)
+19. [Production deployment guide (detailed)](#production-deployment-ubuntu-2204--2404-no-docker)
+20. [Troubleshooting](#troubleshooting)
+21. [Roadmap](#roadmap)
+22. [Contributing](#contributing)
+23. [License](#license)
+24. [FAQ](#faq)
 ---
 
 ## Why?
@@ -936,6 +937,73 @@ lines = build_mrz({
 
 Every check digit is computed correctly, so the result round-trips through the
 parser.
+
+---
+
+## Printed fields the MRZ does not carry
+
+The machine-readable zone carries the document number, the latin name, the
+dates and the nationality — all check-digit protected. It does **not** carry the
+Arabic name or the issuing authority. Those are printed only in the visual zone,
+beside a label, and they are found the way a reader finds them: by the label.
+
+Pass `?viz=true` and the response gains a `viz` block:
+
+```bash
+curl -X POST "https://ocr.example.com/api/v1/ocr?viz=true&mrz=true&include_blocks=false" \
+  -H "X-API-Key: $OCR_API_KEY" \
+  -F "image=@passport-page.jpg"
+```
+
+```json
+{
+  "viz": {
+    "name_ar":              { "value": "…", "confidence": 0.97, "source": "adjacent" },
+    "issuing_authority":    { "value": "DAMMAM", "confidence": 0.94, "source": "adjacent" },
+    "issuing_authority_ar": { "value": "الدمام", "confidence": 0.94, "source": "adjacent" }
+  }
+}
+```
+
+> **These values are read, not verified.** Every MRZ field is checked against a
+> digit computed from the characters themselves, so a misread is usually caught.
+> A printed field has nothing of the kind: `confidence` is the only signal you
+> get, and a wrong character produces a plausible wrong answer rather than an
+> error. Treat them accordingly — as a starting point for a human, not as
+> something to write into a record unattended.
+
+Reading the block:
+
+- **The `viz` key is absent when nothing was found**, the same convention the
+  `mrz` block follows. A page with no labels is a normal result.
+- **`source` says how the value was found.** `merged` — the label and the value
+  came back as one recognised box; `adjacent` — the value was in its own box
+  beside or below the label. Both arrangements occur, sometimes on two designs
+  of the same document.
+- **A label alone is not a field.** If the label is found but nothing next to it
+  looks like a value, the field is absent rather than filled with whatever sat
+  closest. Dates, other labels, and single stray letters are all rejected.
+- Both scripts are recognised, so `OCR_LANGUAGES` need not include `arabic` for
+  this to work — the extraction adds what it needs.
+
+### When the first pass cannot read the region
+
+Faded or older document designs defeat a normal recognition pass in exactly the
+places these fields live. When a field is missing, the data region is re-read
+enlarged and hard-normalised, and **only the missing fields are filled in**.
+
+A value the first pass read is never replaced, because the harsher processing
+that rescues faint print degrades print that was already legible — measurably
+so. Values recovered this way clear a higher confidence bar
+(`VIZ_FALLBACK_MIN_CONFIDENCE`) than the first pass, since their input is a
+region that already failed to read once.
+
+`timings_ms.viz_ms` covers the whole thing; it stays in single-digit
+milliseconds when the first pass found everything, and costs a second
+recognition pass when it did not.
+
+Turn the whole feature on by default with `ENABLE_VIZ=true`, the fallback off
+with `VIZ_FALLBACK=false`.
 
 ---
 
