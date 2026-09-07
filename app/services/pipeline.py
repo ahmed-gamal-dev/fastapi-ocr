@@ -214,6 +214,22 @@ async def run_pipeline(
             warnings.append("machine-readable zone parsing failed")
         timings["mrz_ms"] = round((time.perf_counter() - started_mrz) * 1000, 1)
 
+        # A full-page pass optimises for the page, not for a dense band of
+        # monospaced glyphs at its foot. When it misses the zone entirely -
+        # routine on faint or older document designs - locate the band and
+        # recognise it on its own terms before concluding there is none.
+        if mrz_document is None and settings.MRZ_BAND_FALLBACK:
+            started_band = time.perf_counter()
+            try:
+                mrz_document = await _parse_mrz_from_band(
+                    engine, prepared.image, options.languages
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("mrz_band_pass_failed", extra={"error": str(exc)})
+            timings["mrz_band_ms"] = round(
+                (time.perf_counter() - started_band) * 1000, 1
+            )
+
     summary = confidence_summary(lines)
     if summary["mean"] and summary["mean"] < settings.MIN_OVERALL_CONFIDENCE:
         warnings.append("overall recognition confidence is low")
@@ -252,6 +268,53 @@ async def run_pipeline(
         },
     )
     return result
+
+
+async def _parse_mrz_from_band(
+    engine: OCREngine, image: Any, languages: Sequence[str]
+):
+    """Locate the MRZ band, recognise it alone, and parse the result.
+
+    The zone is Latin OCR-B, so it is read with the latin model regardless of
+    the languages the caller asked for; an arabic-only request still gets its
+    passport parsed. Candidates are tried best-scoring first and the first
+    structurally valid parse wins - nothing is returned when none of them
+    parses, exactly as when no band was found at all.
+    """
+    from app.services.image_processing.mrz_locator import (
+        find_mrz_regions,
+        prepare_mrz_crop,
+    )
+
+    regions = find_mrz_regions(image, max_regions=settings.MRZ_BAND_MAX_REGIONS)
+    if not regions:
+        return None
+
+    # Latin first. The caller's own languages are the fallback for deployments
+    # that ship no latin model at all.
+    latin_first: List[Sequence[str]] = [("en",)]
+    if languages and list(languages) != ["en"]:
+        latin_first.append(tuple(languages))
+
+    for region in regions:
+        crop = prepare_mrz_crop(image, region)
+        if crop is None:
+            continue
+        for attempt in latin_first:
+            blocks, _, _ = await _recognize_all(engine, crop, attempt)
+            if not blocks:
+                continue
+            document = _parse_mrz(blocks)
+            if document is not None:
+                logger.debug(
+                    "mrz_recovered_from_band",
+                    extra={"source": region.source, "score": round(region.score, 3)},
+                )
+                return document
+            # The latin model read something that did not parse; a second
+            # model on the same crop will not read it better.
+            break
+    return None
 
 
 def _parse_mrz(blocks: Sequence[TextBlock], summary_mean: Optional[float] = None):

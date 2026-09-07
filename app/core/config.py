@@ -104,6 +104,13 @@ class Settings(BaseSettings):
     # Machine readable zone detection/parsing (ICAO 9303 TD1/TD2/TD3, MRV).
     ENABLE_MRZ: bool = True
     MRZ_UPSCALE_FACTOR: float = 2.0
+    # When a full-page pass finds no zone, locate the MRZ band and give it its
+    # own upscaled, contrast-normalised recognition pass. Costs one extra OCR
+    # call on a small crop, and only on documents the first pass missed - which
+    # is the usual outcome for low-contrast or older document designs.
+    MRZ_BAND_FALLBACK: bool = True
+    # Candidate bands tried before giving up, best-scoring first.
+    MRZ_BAND_MAX_REGIONS: int = 3
 
     # ------------------------------------------------------------- thresholds
     # Below this a field is still returned but flagged as low confidence.
