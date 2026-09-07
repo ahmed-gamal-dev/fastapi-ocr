@@ -112,6 +112,22 @@ class Settings(BaseSettings):
     # Candidate bands tried before giving up, best-scoring first.
     MRZ_BAND_MAX_REGIONS: int = 3
 
+    # ------------------------------------------------------------------- viz
+    # Visual-inspection-zone fields: the ones printed next to a label and absent
+    # from the machine-readable zone, such as the Arabic name and the issuing
+    # authority. Unlike MRZ fields these carry no check digit, so they are
+    # recognition output and nothing more - see the README before relying on them.
+    ENABLE_VIZ: bool = False
+    # Re-read the data region enlarged and hard-normalised when a field is
+    # missing. Only ever fills gaps; a value the first pass read is never
+    # replaced, because the harsher processing degrades text that was already
+    # legible.
+    VIZ_FALLBACK: bool = True
+    VIZ_UPSCALE_FACTOR: float = 2.0
+    # Values recovered by the fallback clear a higher bar than the first pass:
+    # its input is a region that already failed to read once.
+    VIZ_FALLBACK_MIN_CONFIDENCE: float = 0.80
+
     # ------------------------------------------------------------- thresholds
     # Below this a field is still returned but flagged as low confidence.
     MIN_FIELD_CONFIDENCE: float = 0.40

@@ -222,6 +222,23 @@ def upscale(image: Any, factor: float) -> Any:
     )
 
 
+def enhance_faint_text(image: Any, factor: float = 2.0) -> Any:
+    """Upscale and hard-normalise a region whose print is too faint to read.
+
+    Stronger than :func:`enhance`, which is tuned to leave a legible page
+    legible. This one is for a region that already failed: it enlarges the
+    glyphs first, then equalises locally and sharpens hard. That trade costs
+    fidelity on well-printed text - it is a second attempt at a region that did
+    not read, never a replacement for the first pass.
+    """
+    scaled = upscale(image, factor)
+    gray = to_gray(scaled)
+    gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
+    gray = cv2.fastNlMeansDenoising(gray, None, 7, 7, 21)
+    sharpened = cv2.addWeighted(gray, 1.5, cv2.GaussianBlur(gray, (0, 0), 3), -0.5, 0)
+    return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+
+
 # ------------------------------------------------------------------ pipeline
 def preprocess(image: Any, rotation: int = 0) -> PreprocessResult:
     """Run the standard preprocessing chain over a decoded image."""

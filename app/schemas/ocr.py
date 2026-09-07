@@ -119,6 +119,24 @@ class MRZModel(BaseModel):
     )
 
 
+class VizFieldModel(BaseModel):
+    """One field read out of the printed part of a document.
+
+    No check digit protects these, so ``confidence`` is the only signal of how
+    well it was read - unlike an MRZ field, nothing corroborates the value.
+    """
+
+    value: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    source: str = Field(
+        ...,
+        description=(
+            "'merged' when the label and the value shared one recognised box, "
+            "'adjacent' when the value was found beside or below its label."
+        ),
+    )
+
+
 class OCRResponse(BaseModel):
     """Successful result of ``POST /api/v1/ocr``."""
 
@@ -149,6 +167,17 @@ class OCRResponse(BaseModel):
             "Parsed machine-readable zone, when one was found and requested. "
             "Absent otherwise - its absence means no zone was detected, not "
             "that the document lacks one."
+        ),
+    )
+    viz: Optional[Dict[str, VizFieldModel]] = Field(
+        default=None,
+        description=(
+            "Fields printed beside a label and absent from the machine-readable "
+            "zone, such as the Arabic name and the issuing authority. Returned "
+            "when viz=true and at least one field was found. These are "
+            "recognition output with nothing to corroborate them - no check "
+            "digit exists for a printed field - so treat them as read, not as "
+            "verified."
         ),
     )
 
@@ -277,4 +306,18 @@ def build_response(
         processing_time_ms=round(elapsed_ms, 1),
         warnings=result.warnings,
         mrz=build_mrz(getattr(result, "mrz", None), include_raw=include_mrz_raw),
+        viz=build_viz(getattr(result, "viz", None)),
     )
+
+
+def build_viz(fields: Any) -> Optional[Dict[str, VizFieldModel]]:
+    """Map extracted visual-zone fields onto the wire format.
+
+    ``None`` rather than an empty object when nothing was found, so the key is
+    simply absent - the same convention the MRZ block follows.
+    """
+    if not fields:
+        return None
+    return {
+        name: VizFieldModel(**field.to_dict()) for name, field in fields.items()
+    }

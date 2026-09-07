@@ -109,6 +109,15 @@ async def ocr(
             "string, so it is opt-in."
         ),
     ),
+    viz: Optional[bool] = Query(
+        default=None,
+        description=(
+            "Extract the fields printed beside a label and absent from the "
+            "machine-readable zone - the Arabic name and the issuing authority. "
+            "Defaults to the ENABLE_VIZ setting. Nothing corroborates these "
+            "values the way a check digit corroborates an MRZ field."
+        ),
+    ),
     _: str = Depends(enforce_rate_limit),
 ) -> OCRResponse:
     """Run OCR over one image and return the recognised text with geometry.
@@ -133,6 +142,7 @@ async def ocr(
             include_regions=include_regions,
             min_confidence=min_confidence,
             parse_mrz=mrz,
+            parse_viz=viz,
         )
         result = await run_pipeline(data, image.filename, options)
         store_upload_if_enabled(data, result.image.detected_mime if result.image else None)

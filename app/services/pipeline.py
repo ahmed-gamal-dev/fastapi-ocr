@@ -51,6 +51,7 @@ class PipelineOptions:
     include_regions: bool = False
     min_confidence: float = 0.0
     parse_mrz: bool = False
+    parse_viz: bool = False
 
     @classmethod
     def build(
@@ -62,6 +63,7 @@ class PipelineOptions:
         include_regions: bool = False,
         min_confidence: float = 0.0,
         parse_mrz: Optional[bool] = None,
+        parse_viz: Optional[bool] = None,
     ) -> PipelineOptions:
         return cls(
             languages=list(languages) if languages else list(settings.OCR_LANGUAGES),
@@ -81,6 +83,7 @@ class PipelineOptions:
             include_regions=include_regions,
             min_confidence=max(0.0, min(1.0, min_confidence)),
             parse_mrz=(settings.ENABLE_MRZ if parse_mrz is None else parse_mrz),
+            parse_viz=(settings.ENABLE_VIZ if parse_viz is None else parse_viz),
         )
 
 
@@ -99,6 +102,9 @@ class PipelineResult:
     warnings: List[str] = field(default_factory=list)
     #: Parsed machine-readable zone, or None when none was found or requested.
     mrz: Optional[Any] = None
+    #: Visual-zone fields found by label, keyed by field name. Empty when none
+    #: were found or none were requested. Unverified: no check digits exist.
+    viz: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def word_count(self) -> int:
@@ -189,6 +195,11 @@ async def run_pipeline(
         if dropped:
             warnings.append(f"{dropped} block(s) dropped below min_confidence")
 
+    # Deduplication picks one box per region across languages, which is right
+    # for the page text and wrong for field extraction: a bilingual value like
+    # "DAMMAM الدمام" loses one of its two scripts, and with it one of the two
+    # fields it carries. Field extraction gets the boxes as recognised.
+    every_block = list(blocks)
     if len(options.languages) > 1:
         blocks = deduplicate_blocks(blocks)
 
@@ -230,6 +241,23 @@ async def run_pipeline(
                 (time.perf_counter() - started_band) * 1000, 1
             )
 
+    # ---------------------------------------------------------------- VIZ
+    # The fields printed beside a label and absent from the machine-readable
+    # zone. Additive and opt-in, like the MRZ block above.
+    viz_fields: Dict[str, Any] = {}
+    if options.parse_viz and blocks:
+        started_viz = time.perf_counter()
+        try:
+            viz_fields = _parse_viz(every_block)
+            if settings.VIZ_FALLBACK:
+                viz_fields = await _fill_viz_gaps(
+                    engine, prepared.image, options.languages, viz_fields
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("viz_parse_failed", extra={"error": str(exc)})
+            warnings.append("visual-zone field extraction failed")
+        timings["viz_ms"] = round((time.perf_counter() - started_viz) * 1000, 1)
+
     summary = confidence_summary(lines)
     if summary["mean"] and summary["mean"] < settings.MIN_OVERALL_CONFIDENCE:
         warnings.append("overall recognition confidence is low")
@@ -248,6 +276,7 @@ async def run_pipeline(
         timings=timings,
         warnings=warnings,
         mrz=mrz_document,
+        viz=viz_fields,
     )
 
     # Counts and timings only: no recognised text ever reaches the log stream.
@@ -265,9 +294,70 @@ async def run_pipeline(
             # contents, which are personal data.
             "mrz_found": mrz_document is not None,
             "mrz_valid": bool(mrz_document and mrz_document.valid),
+            # Which fields were found, never what they said.
+            "viz_fields": sorted(viz_fields),
         },
     )
     return result
+
+
+def _parse_viz(blocks: Sequence[TextBlock]) -> Dict[str, Any]:
+    """Extract the labelled visual-zone fields from recognised boxes."""
+    from app.services import viz
+
+    return viz.extract(blocks)
+
+
+async def _fill_viz_gaps(
+    engine: OCREngine,
+    image: Any,
+    languages: Sequence[str],
+    found: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Re-read the data region enlarged, and fill in only what is still missing.
+
+    The harsher processing that rescues faint print degrades print that was
+    already legible, so what the first pass read is kept as it read it. This
+    pass exists to turn an absent field into a present one, never to revise a
+    present one.
+    """
+    from app.services import viz
+    from app.services.image_processing.preprocess import enhance_faint_text
+
+    if all(spec.name in found for spec in viz.FIELD_SPECS):
+        return found
+
+    height = image.shape[0]
+    # The zone lives above the machine-readable band; including it wastes the
+    # enlargement on glyphs that are already read elsewhere.
+    region = image[0 : max(1, int(height * 0.80)), :]
+    enhanced = enhance_faint_text(region, settings.VIZ_UPSCALE_FACTOR)
+
+    blocks: List[TextBlock] = []
+    for language in _viz_languages(languages):
+        recognised, _, _ = await _recognize_all(engine, enhanced, (language,))
+        blocks.extend(recognised)
+    if not blocks:
+        return found
+
+    filled = dict(found)
+    for name, candidate in viz.extract(blocks).items():
+        if name in filled:
+            continue
+        if candidate.confidence < settings.VIZ_FALLBACK_MIN_CONFIDENCE:
+            continue
+        filled[name] = candidate
+        logger.debug("viz_recovered_from_region", extra={"field": name})
+    return filled
+
+
+def _viz_languages(languages: Sequence[str]) -> List[str]:
+    """Both scripts are needed: the fields come in an Arabic and a latin form."""
+    ordered = [lang for lang in languages]
+    for required in ("arabic", "en"):
+        if required not in ordered:
+            ordered.append(required)
+    return ordered
 
 
 async def _parse_mrz_from_band(
