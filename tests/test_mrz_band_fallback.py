@@ -220,6 +220,69 @@ def test_a_corrupt_zone_is_never_reported_as_valid(band_fallback_on):
     assert result.mrz is None or result.mrz.valid is False
 
 
+# ------------------------------------------------------- a parse that is wrong
+#
+# The name field carries no check digit. A "<<" read as "<C" merges the given
+# names into the surname, and the result satisfies every digit in the zone while
+# being wrong - so a successful parse is not on its own a reason to stop.
+
+TRUNCATED = [
+    "P<UTOERIKSSON<CANNA<MARIA<<<<<<<<<<<<<<<<<<",
+    "L898902C36UTO7408122F1204159ZE184226B<<<<<10",
+]
+
+
+def test_a_name_that_lost_its_separator_is_recognised_as_truncated():
+    from app.services.mrz import create_parser
+    from app.services.pipeline import _mrz_looks_truncated
+
+    parser = create_parser("icao9303")
+    truncated = parser.parse_lines(TRUNCATED, ocr_confidence=0.85)
+    whole = parser.parse_lines(SPECIMEN, ocr_confidence=0.96)
+
+    # Both satisfy every check digit; only completeness tells them apart.
+    assert truncated.valid is True
+    assert _mrz_looks_truncated(truncated) is True
+    assert _mrz_looks_truncated(whole) is False
+
+
+def test_the_band_pass_runs_on_a_zone_that_parsed_but_lost_the_names(
+    band_fallback_on,
+):
+    provider = BandAwareProvider(
+        page=PAGE_BLOCKS + zone_blocks(TRUNCATED, y=500), band=zone_blocks()
+    )
+
+    result = run(provider)
+
+    assert provider.band_calls, "a truncated name should earn a second look"
+    assert result.mrz.value("surname") == "ERIKSSON"
+    assert result.mrz.value("given_names") == "ANNA MARIA"
+
+
+def test_a_complete_page_parse_is_never_replaced(band_fallback_on):
+    """The band pass adds; it does not overrule a page pass that read the names."""
+    provider = BandAwareProvider(
+        page=PAGE_BLOCKS + zone_blocks(y=500), band=zone_blocks(TRUNCATED)
+    )
+
+    result = run(provider)
+
+    assert result.mrz.value("given_names") == "ANNA MARIA"
+
+
+def test_a_truncated_name_survives_when_the_band_reads_no_better(band_fallback_on):
+    """A holder with one name looks the same. The result is kept, not discarded."""
+    provider = BandAwareProvider(
+        page=PAGE_BLOCKS + zone_blocks(TRUNCATED, y=500), band=[]
+    )
+
+    result = run(provider)
+
+    assert result.mrz is not None
+    assert result.mrz.value("surname") == "ERIKSSON CANNA MARIA"
+
+
 # --------------------------------------------------------------- latin model
 def test_an_arabic_only_request_still_reads_the_latin_zone(band_fallback_on):
     """The zone is Latin OCR-B whatever the caller asked the page to be read as."""

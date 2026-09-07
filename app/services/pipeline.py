@@ -229,12 +229,20 @@ async def run_pipeline(
         # monospaced glyphs at its foot. When it misses the zone entirely -
         # routine on faint or older document designs - locate the band and
         # recognise it on its own terms before concluding there is none.
-        if mrz_document is None and settings.MRZ_BAND_FALLBACK:
+        #
+        # A zone that parsed is not necessarily a zone that was read correctly:
+        # the name carries no check digit, so a misread there validates like
+        # anything else. _mrz_looks_truncated spots the shape that leaves, and
+        # the band pass gets its chance on those too.
+        if settings.MRZ_BAND_FALLBACK and (
+            mrz_document is None or _mrz_looks_truncated(mrz_document)
+        ):
             started_band = time.perf_counter()
             try:
-                mrz_document = await _parse_mrz_from_band(
+                from_band = await _parse_mrz_from_band(
                     engine, prepared.image, options.languages
                 )
+                mrz_document = _better_mrz(mrz_document, from_band)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("mrz_band_pass_failed", extra={"error": str(exc)})
             timings["mrz_band_ms"] = round(
@@ -251,7 +259,11 @@ async def run_pipeline(
             viz_fields = _parse_viz(every_block)
             if settings.VIZ_FALLBACK:
                 viz_fields = await _fill_viz_gaps(
-                    engine, prepared.image, options.languages, viz_fields
+                    engine,
+                    prepared.image,
+                    options.languages,
+                    viz_fields,
+                    is_identity_document=mrz_document is not None,
                 )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("viz_parse_failed", extra={"error": str(exc)})
@@ -301,6 +313,42 @@ async def run_pipeline(
     return result
 
 
+def _mrz_looks_truncated(document: Any) -> bool:
+    """Did the name field lose its separator?
+
+    ``SURNAME<<GIVEN<NAMES`` becomes one long surname the moment a ``<<`` is
+    read as anything else, and no check digit covers the name, so the result
+    validates cleanly while being wrong. An empty given-names field on a
+    document that has a surname is the shape that leaves behind.
+
+    A holder with only one name produces the same shape legitimately, which is
+    why this only earns a second look - never a rejection.
+    """
+    try:
+        surname = document.value("surname")
+        given_names = document.value("given_names")
+    except Exception:  # pragma: no cover - defensive
+        return False
+    return bool(surname) and not given_names
+
+
+def _better_mrz(first: Any, second: Any) -> Any:
+    """Pick between a page-pass parse and a band-pass parse of the same zone.
+
+    Completeness decides: a parse that recovered the given names read a
+    separator the other one missed. Nothing else about the two is comparable -
+    both satisfy every check digit, which is exactly the problem.
+    """
+    if second is None:
+        return first
+    if first is None:
+        return second
+    if _mrz_looks_truncated(first) and not _mrz_looks_truncated(second):
+        logger.debug("mrz_name_recovered_from_band")
+        return second
+    return first
+
+
 def _parse_viz(blocks: Sequence[TextBlock]) -> Dict[str, Any]:
     """Extract the labelled visual-zone fields from recognised boxes."""
     from app.services import viz
@@ -313,6 +361,7 @@ async def _fill_viz_gaps(
     image: Any,
     languages: Sequence[str],
     found: Dict[str, Any],
+    is_identity_document: bool = False,
 ) -> Dict[str, Any]:
     """Re-read the data region enlarged, and fill in only what is still missing.
 
@@ -320,11 +369,18 @@ async def _fill_viz_gaps(
     already legible, so what the first pass read is kept as it read it. This
     pass exists to turn an absent field into a present one, never to revise a
     present one.
+
+    It costs a full extra recognition, so it needs a reason to believe the
+    fields are there to be found: a field already read, or a machine-readable
+    zone. An invoice has neither, and re-reading one enlarged would cost every
+    caller a second pass to discover again that it holds no passport fields.
     """
     from app.services import viz
     from app.services.image_processing.preprocess import enhance_faint_text
 
     if all(spec.name in found for spec in viz.FIELD_SPECS):
+        return found
+    if not found and not is_identity_document:
         return found
 
     height = image.shape[0]

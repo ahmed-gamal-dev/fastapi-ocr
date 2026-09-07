@@ -788,9 +788,17 @@ miss the zone completely. When that happens the pipeline locates the MRZ band,
 crops it, upscales and contrast-normalises it, and gives it its own recognition
 pass before concluding there is no zone.
 
-- It only runs **when the page pass found no zone**, so a document that reads
+- It runs **when the page pass found no zone**, so a document that reads
   cleanly the first time pays nothing for it. `timings_ms.mrz_band_ms` appears
   only on the requests that needed it.
+- It also runs when a zone *did* parse but **lost the separator in the name**.
+  `SURNAME<<GIVEN<NAMES` becomes one long surname the moment a `<<` is read as
+  anything else, and since no check digit covers the name, that result
+  validates cleanly while being wrong. An empty `given_names` beside a present
+  `surname` is the shape it leaves, and it earns the region a second look. A
+  holder with only one name produces the same shape legitimately, so this only
+  ever adds a second attempt — the first result is kept unless the second one
+  recovers the names.
 - The band is read with the **latin** model whatever languages you asked for,
   because the zone is Latin OCR-B. An `arabic`-only request still gets its
   passport parsed.
@@ -997,6 +1005,11 @@ that rescues faint print degrades print that was already legible — measurably
 so. Values recovered this way clear a higher confidence bar
 (`VIZ_FALLBACK_MIN_CONFIDENCE`) than the first pass, since their input is a
 region that already failed to read once.
+
+It needs a reason to believe the fields are there before spending a second
+recognition on them: **at least one field already read, or a machine-readable
+zone**. An invoice has neither, so it never pays for a re-read that could only
+find nothing again.
 
 `timings_ms.viz_ms` covers the whole thing; it stays in single-digit
 milliseconds when the first pass found everything, and costs a second
