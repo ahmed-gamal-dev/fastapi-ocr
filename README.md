@@ -779,6 +779,29 @@ Reading the block:
 The zone contents never reach the logs; only whether a zone was found and
 whether it validated.
 
+#### When the page pass misses the zone
+
+A full-page recognition optimises for the page, not for a dense band of
+monospaced glyphs at its foot, and on a faint or older document design it can
+miss the zone completely. When that happens the pipeline locates the MRZ band,
+crops it, upscales and contrast-normalises it, and gives it its own recognition
+pass before concluding there is no zone.
+
+- It only runs **when the page pass found no zone**, so a document that reads
+  cleanly the first time pays nothing for it. `timings_ms.mrz_band_ms` appears
+  only on the requests that needed it.
+- The band is read with the **latin** model whatever languages you asked for,
+  because the zone is Latin OCR-B. An `arabic`-only request still gets its
+  passport parsed.
+- It changes what is **parsed**, never what is **reported as read**: `text` and
+  `blocks` remain what full-page recognition saw. The recovered zone is
+  reported in the `mrz` block, where it is check-digit validated like any other.
+- Nothing is invented. A band that does not parse leaves `mrz` absent, exactly
+  as if no band had been found.
+
+Set `MRZ_BAND_FALLBACK=false` to switch it off, and `MRZ_BAND_MAX_REGIONS` to
+change how many candidate bands are tried (default 3, best-scoring first).
+
 ### Independence
 
 The parser imports nothing from FastAPI, the OCR engines, or the image
