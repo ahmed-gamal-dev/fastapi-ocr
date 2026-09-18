@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.mrz import TD1, TD3
+from app.services.mrz import MRV_A, TD1, TD3
 from app.services.mrz.textscan import (
     candidate_groups,
     formats_for,
@@ -73,6 +73,44 @@ def test_formats_are_offered_by_shape(lines, expected):
 def test_incompatible_shapes_offer_no_format():
     assert list(formats_for(["x" * 44])) == []
     assert list(formats_for(["x" * 10] * 2)) == []
+
+
+# ------------------------------------------------------- the document code
+def test_a_passport_is_not_offered_the_visa_formats():
+    """A passport and an A-size visa share the 2 x 44 shape, so shape alone
+    leaves both on the table. Only the visa's code starts with V."""
+    assert list(formats_for(["P" + "<" * 43, "x" * 44])) == [TD3]
+
+
+def test_a_visa_is_not_offered_the_passport_format():
+    assert list(formats_for(["V" + "<" * 43, "x" * 44])) == [MRV_A]
+
+
+def test_an_unread_document_code_leaves_every_shape_open():
+    """The first character is where a fold or a glare lands. When it did not
+    come back as a letter, nothing has been established and both stay in."""
+    both = {TD3, MRV_A}
+    assert set(formats_for(["<" * 44, "x" * 44])) == both
+    assert set(formats_for(["1" + "<" * 43, "x" * 44])) == both
+
+
+def test_a_damaged_passport_is_not_reclassified_as_a_visa():
+    """The regression this rule exists for.
+
+    A passport whose expiry digit was misread scores worse as a passport
+    (five check digits, three failing) than as a visa (three check digits,
+    one failing) - so ranking by the share that agree used to hand back
+    MRV_A, and with it a document whose composite digit is never examined.
+    """
+    damaged = [
+        "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<",
+        "L898902C36UTO7408122F120415XZE184226B<<<<<10",
+    ]
+    result = parse_lines(damaged)
+    assert result.mrz_type == TD3
+    # Still honestly reported as unverified - the point is the classification,
+    # not rescuing a digit nobody read.
+    assert result.valid is False
 
 
 # --------------------------------------------------------------- joined rows
