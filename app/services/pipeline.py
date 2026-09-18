@@ -378,7 +378,11 @@ async def _fill_viz_gaps(
     from app.services import viz
     from app.services.image_processing.preprocess import enhance_faint_text
 
-    if all(spec.name in found for spec in viz.FIELD_SPECS):
+    wanted = [name for name in settings.VIZ_FALLBACK_FIELDS if name not in found]
+    if not wanted:
+        # What is missing, if anything, is not worth a second recognition. An
+        # issuing authority printed in one script only used to trigger it on
+        # nearly every passport, for 15s, on pages the first pass read fully.
         return found
     if not found and not is_identity_document:
         return found
@@ -408,12 +412,15 @@ async def _fill_viz_gaps(
 
 
 def _viz_languages(languages: Sequence[str]) -> List[str]:
-    """Both scripts are needed: the fields come in an Arabic and a latin form."""
-    ordered = [lang for lang in languages]
-    for required in ("arabic", "en"):
-        if required not in ordered:
-            ordered.append(required)
-    return ordered
+    """One pass with the Arabic model, whatever the page pass used.
+
+    The fields come in an Arabic and a latin form, but they do not need two
+    models: the Arabic recogniser reads latin letters and digits as well. A
+    second, latin-only pass over the same enlarged region doubled the cost of
+    the most expensive step in the request for a duplicate of what the first
+    one returned.
+    """
+    return ["arabic"]
 
 
 async def _parse_mrz_from_band(

@@ -123,6 +123,11 @@ class Settings(BaseSettings):
     # replaced, because the harsher processing degrades text that was already
     # legible.
     VIZ_FALLBACK: bool = True
+    # Which missing fields justify that re-read. It is a full recognition over
+    # an enlarged image - measured at 15s against an 8.6s page pass - so it is
+    # reserved for the field that is both needed and hard: the Arabic name.
+    # When the pass does run, every missing field is still filled from it.
+    VIZ_FALLBACK_FIELDS: CSVList = Field(default_factory=lambda: ["name_ar"])
     VIZ_UPSCALE_FACTOR: float = 2.0
     # Values recovered by the fallback clear a higher bar than the first pass:
     # its input is a region that already failed to read once.
