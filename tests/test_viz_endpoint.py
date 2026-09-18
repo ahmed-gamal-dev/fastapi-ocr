@@ -104,6 +104,59 @@ def test_a_page_with_no_fields_costs_no_second_pass(client, image_bytes, auth_he
     assert calls["n"] == 1, "no field and no zone means nothing to look harder for"
 
 
+def _count_recognitions(client):
+    calls = {"n": 0}
+    original = client.stub.recognize
+
+    def counting(image, lang="en"):
+        calls["n"] += 1
+        return original(image, lang)
+
+    client.stub.recognize = counting  # type: ignore[method-assign]
+    return calls
+
+
+def test_a_missing_authority_alone_costs_no_second_pass(client, image_bytes, auth_headers):
+    """The Arabic name was read; only the issuing authority is missing.
+
+    That used to trigger the enlarged re-read - on nearly every passport,
+    because the authority is often printed in one script or not labelled - and
+    the re-read was the slowest step in the request.
+    """
+    client.stub.set_blocks(
+        "en",
+        [
+            block("KINGDOM OF UTOPIA PASSPORT PAGE", 40, 40, 420, 26, 0.97),
+            block(LABEL_AR, 900, 100, 80, 30, 0.95),
+            block(NAME_AR, 560, 98, 330, 30, 0.97),
+        ],
+    )
+    calls = _count_recognitions(client)
+
+    body = post(client, image_bytes, auth_headers, viz="true", mrz="false").json()
+
+    assert body["viz"]["name_ar"]["value"] == NAME_AR
+    assert calls["n"] == 1
+
+
+def test_a_missing_arabic_name_costs_exactly_one_more_pass(client, image_bytes, auth_headers):
+    """The field worth looking harder for - once, with the Arabic model, which
+    reads latin too. Not once per script."""
+    client.stub.set_blocks(
+        "en",
+        [
+            block("KINGDOM OF UTOPIA PASSPORT PAGE", 40, 40, 420, 26, 0.97),
+            block("مكان الإصدار", 900, 400, 180, 30, 0.92),
+            block(f"{PLACE_EN}{PLACE_AR}", 905, 440, 170, 30, 0.94),
+        ],
+    )
+    calls = _count_recognitions(client)
+
+    post(client, image_bytes, auth_headers, viz="true", mrz="false")
+
+    assert calls["n"] == 2
+
+
 def test_values_never_reach_the_logs(client, image_bytes, auth_headers, caplog):
     """Only which fields were found is logged, never what they said."""
     seed_page(client)
