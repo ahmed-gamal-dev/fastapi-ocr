@@ -290,3 +290,18 @@ def test_det_limit_type_is_pinned_to_max():
 
     kwargs = provider._build_kwargs(inspect.signature(modern), "en")
     assert kwargs["text_det_limit_type"] == "max"
+
+
+def test_modern_dialect_receives_thread_count_and_orientation_setting():
+    import inspect
+
+    from app.services.ocr.paddle import PaddleOCRProvider
+
+    def modern(self, lang=None, use_textline_orientation=None, cpu_threads=None):
+        ...
+
+    provider = PaddleOCRProvider(languages=["en"], cpu_threads=4, textline_orientation=False)
+    kwargs = provider._build_kwargs(inspect.signature(modern), "en")
+
+    assert kwargs["cpu_threads"] == 4
+    assert kwargs["use_textline_orientation"] is False

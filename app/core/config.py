@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # fighting over the same cores; raise it to cut single-request latency on a
     # machine that handles one document at a time.
     OCR_CPU_THREADS: int = 1
+    # Per-line orientation classifier (PaddleOCR 3.x). On by default; turn off
+    # for documents photographed upright - it costs a model run per text line.
+    OCR_TEXTLINE_ORIENTATION: bool = True
     OCR_TIMEOUT_SECONDS: float = 45.0
     OCR_WARMUP_ON_STARTUP: bool = True
     # Return every raw recognised block in the response (useful for debugging
