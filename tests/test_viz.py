@@ -176,3 +176,16 @@ def test_nothing_is_pending_once_every_field_is_read():
     pending = viz.missing_labels(separate_label_page())
 
     assert pending == []
+
+
+def test_a_name_label_misread_by_one_letter_still_anchors_the_name():
+    # "الاسم" read as "الدسم" - the Arabic name was never found on a page the
+    # recogniser had otherwise read perfectly, which also triggered the slow
+    # enlarged re-read for nothing.
+    found = viz.extract([block("الدسم شيخه بنت محمد بن منصور", 468, 121)])
+
+    assert found["name_ar"].value == "شيخه بنت محمد بن منصور"
+
+
+def test_a_longer_word_that_merely_begins_like_a_label_is_not_a_label():
+    assert "name_ar" not in viz.extract([block("الدسمان شيخه بنت محمد", 468, 121)])
