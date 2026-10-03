@@ -167,6 +167,35 @@ def _key(text: str) -> str:
     return re.sub(r"\s+", " ", normalise_arabic(text)).strip().lower()
 
 
+def _edit_distance(a: str, b: str) -> int:
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(
+                min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb))
+            )
+        previous = current
+    return previous[-1]
+
+
+def _fuzzy_prefix(key: str, label: str) -> bool:
+    """Does the box open with this label, give or take one misread letter?
+
+    Only for Arabic labels of five letters or more: the recogniser turns the
+    name label "الاسم" into "الدسم" often enough that the Arabic name was never
+    found on a page it had read perfectly. Anything shorter would start matching
+    ordinary words, and the check needs the box to continue past the label as a
+    separate word, so a longer word that merely begins alike is not a label.
+    """
+    if len(label) < 5 or not is_arabic(label):
+        return False
+    head = key[: len(label)]
+    if len(head) < len(label) or (len(key) > len(label) and key[len(label)] != " "):
+        return False
+    return _edit_distance(head, label) <= 1
+
+
 def _label_at_start(text: str, spec: FieldSpec) -> Optional[Tuple[str, str]]:
     """``(label, remainder)`` when this box opens with one of the labels.
 
@@ -178,7 +207,15 @@ def _label_at_start(text: str, spec: FieldSpec) -> Optional[Tuple[str, str]]:
     key = _key(text)
     for label in sorted(spec.labels, key=len, reverse=True):
         if not key.startswith(label):
-            continue
+            if not _fuzzy_prefix(key, label):
+                continue
+            # The label was misspelt ("الدسم" for "الاسم"), so folding cannot
+            # find its end by equality; it ends where as many folded characters
+            # have been consumed as the label has.
+            for end in range(1, min(len(text), len(label) * 2 + 16) + 1):
+                if len(_key(text[:end])) >= len(label):
+                    return label, text[end:]
+            return label, ""
         # Folding can change length, so walk the original until its folded
         # prefix is the label; that boundary is where the value begins.
         limit = min(len(text), len(label) * 2 + 16)
