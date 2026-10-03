@@ -172,6 +172,7 @@ class Settings(BaseSettings):
         "ALLOWED_MIME_TYPES",
         "ALLOWED_EXTENSIONS",
         "OCR_LANGUAGES",
+        "VIZ_FALLBACK_FIELDS",
         mode="before",
     )
     @classmethod
