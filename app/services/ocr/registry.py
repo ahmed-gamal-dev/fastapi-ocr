@@ -42,6 +42,7 @@ def _paddle_factory() -> OCRProvider:
         drop_score=settings.OCR_DROP_SCORE,
         model_dir=settings.OCR_MODEL_DIR,
         cpu_threads=settings.OCR_CPU_THREADS,
+        textline_orientation=settings.OCR_TEXTLINE_ORIENTATION,
         det_model_name=settings.OCR_DET_MODEL_NAME,
         rec_model_name=settings.OCR_REC_MODEL_NAME,
     )

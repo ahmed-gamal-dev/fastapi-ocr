@@ -95,6 +95,7 @@ class PaddleOCRProvider(OCRProvider):
         drop_score: float = 0.35,
         model_dir: Optional[str] = None,
         cpu_threads: int = 1,
+        textline_orientation: bool = True,
         det_model_name: Optional[str] = None,
         rec_model_name: Optional[str] = None,
     ) -> None:
@@ -104,6 +105,7 @@ class PaddleOCRProvider(OCRProvider):
         self._drop_score = drop_score
         self._model_dir = model_dir
         self._cpu_threads = max(1, cpu_threads)
+        self._textline_orientation = textline_orientation
         self._det_model_name = det_model_name
         self._rec_model_name = rec_model_name
         if (
@@ -151,7 +153,14 @@ class PaddleOCRProvider(OCRProvider):
         }
         modern: Dict[str, Any] = {
             "lang": ENGINE_LANG_V3.get(lang, lang),
-            "use_textline_orientation": True,
+            # A classifier run over every detected line. Worth it for scans that
+            # may be rotated line by line; wasted on a document photographed
+            # upright, so it is a setting (OCR_TEXTLINE_ORIENTATION).
+            "use_textline_orientation": self._textline_orientation,
+            # 3.x honours the thread count only when it is passed explicitly;
+            # without it every request ran on one thread whatever
+            # OCR_CPU_THREADS said.
+            "cpu_threads": self._cpu_threads,
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,
             "text_det_limit_side_len": self._det_limit_side_len,
