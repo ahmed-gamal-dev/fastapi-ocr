@@ -34,6 +34,14 @@ Environment=PYTHONUNBUFFERED=1
 # Keep the model cache inside the app directory so it survives updates and is
 # owned by the service user.
 Environment=PADDLE_PDX_CACHE_HOME=/opt/passport-ocr/models
+# PaddleX fetches models through HuggingFace first, then ModelScope, and only
+# then falls back to Baidu's bcebos.com mirror. Both hub clients keep their
+# cache under $HOME, which ProtectHome=true hides, so without these two lines
+# both fail with "Permission denied" and every model comes from bcebos - which
+# from outside China can take tens of minutes for a single model. Point them
+# at a path the service is already allowed to write.
+Environment=HF_HOME=/opt/passport-ocr/models/hf
+Environment=MODELSCOPE_CACHE=/opt/passport-ocr/models/modelscope
 
 # Run inference through Paddle's own kernels instead of oneDNN.
 #

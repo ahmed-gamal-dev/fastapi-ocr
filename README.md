@@ -1889,6 +1889,15 @@ PaddleOCR is downloading models. It needs network access once; afterwards it is
 offline. Watch with `LOG_LEVEL=DEBUG`, or pre-download (see
 [Quick start](#2-real-ocr-with-paddleocr)).
 
+**First start takes tens of minutes; the logs show `Permission denied: '/home/ocr/.cache/huggingface/token'`**
+PaddleX tries HuggingFace, then ModelScope, then Baidu's `bcebos.com`. Both hub
+clients cache under `$HOME`, which the unit's `ProtectHome=true` hides, so they
+fail and every model is fetched from `bcebos.com`, which is very slow from
+outside China. `deploy/passport-ocr.service` sets `HF_HOME` and
+`MODELSCOPE_CACHE` under `/opt/passport-ocr/models` to avoid this; a unit
+installed from an older copy needs those two lines added, then
+`systemctl daemon-reload && systemctl restart passport-ocr`.
+
 **`paddlepaddle` will not install**
 Wheel availability varies by platform and Python version — Apple Silicon in
 particular is patchy. Check <https://www.paddlepaddle.org.cn/en> for the wheel
