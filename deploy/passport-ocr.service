@@ -27,6 +27,18 @@ EnvironmentFile=/opt/passport-ocr/.env
 # One thread per math library. Each Uvicorn worker already runs its own OCR
 # pool; letting BLAS/OpenMP fan out over every core on top of that makes
 # concurrent requests contend and finish slower.
+#
+# On a host that reads one document at a time, raise all three to match
+# OCR_CPU_THREADS with a drop-in rather than editing this file:
+#   sudo systemctl edit passport-ocr
+#     [Service]
+#     Environment=OMP_NUM_THREADS=4
+#     Environment=OPENBLAS_NUM_THREADS=4
+#     Environment=MKL_NUM_THREADS=4
+# Do not cap CPUQuota or set MemoryHigh below ~3G there: the kernel throttles
+# the process every time it crosses MemoryHigh. On a 4-core VPS a passport read
+# that did not finish in 180s at MemoryHigh=1800M/CPUQuota=150% took 42s with
+# MemoryHigh=3000M, no quota and 4 threads.
 Environment=OMP_NUM_THREADS=1
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=MKL_NUM_THREADS=1
